@@ -1519,9 +1519,9 @@ def build_admin_diag_text(st: dict, webhook_info: dict) -> str:
         f"- Время старта: {started_at}\n"
         f"- Подтверждений конца: {end_streak} (нужно {END_CONFIRM_STREAK}) ✅\n\n"
         "Команды в Телеграм:\n"
-        f"- Бот "на связи": {on_air_icon} {on_air_text} (последний опрос: {_age_str(poll_age)} назад)\n"
-        f"- Последняя команда (/stream и т.п.): {_age_str(cmd_age)} назад)\n"
-        f"- Самовосстановление (watchdog): {_age_str(rec_age)} назад)\n\n"
+        f"- Бот \"на связи\": {on_air_icon} {on_air_text} (последний опрос: {_age_str(poll_age)} назад)\n"
+        f"- Последняя команда (/stream и т.п.): {_age_str(cmd_age)} назад\n"
+        f"- Самовосстановление (watchdog): {_age_str(rec_age)} назад\n\n"
         "Очередь сообщений Telegram:\n"
         f"- Webhook: {webhook_state}\n"
         f"- В очереди Telegram: {esc(pend)} (сколько апдейтов ждут доставки)\n"
@@ -1685,7 +1685,8 @@ def commands_loop_once():
 
             if not (kick.get("live") or vk.get("live")):
                 try:
-                    tg_send_to(chat_id, thread_id, build_no_stream_text("Сейчас на канале Глад Валакас патока нет!"), reply_to=reply_to)
+                    # NO BUTTONS for "no stream" message
+                    tg_send_to(chat_id, thread_id, build_no_stream_text("Сейчас на канале Глад Валакас патока нет!"), reply_to=reply_to, with_buttons=False)
                 except Exception as e:
                     log_line(f"send no-stream reply failed: {e}")
             else:
@@ -1801,7 +1802,8 @@ def main_loop():
             last_ts = int(st.get("last_no_stream_start_ts") or 0)
         if ts() - last_ts >= NO_STREAM_START_DEDUP_SEC:
             try:
-                tg_send(build_no_stream_text("Сейчас на канале Глад Валакас патока нет!"))
+                # NO BUTTONS for "no stream" message
+                tg_send_to(GROUP_ID, TOPIC_ID, build_no_stream_text("Сейчас на канале Глад Валакас патока нет!"), reply_to=None, with_buttons=False)
             except Exception as e:
                 log_line(f"No-stream-on-start send error: {e}")
             with STATE_LOCK:
