@@ -92,7 +92,6 @@ FFMPEG_SCALE = os.getenv("FFMPEG_SCALE", "1280:-1").strip()
 MAX_TITLE_LEN = int(os.getenv("MAX_TITLE_LEN", "180"))
 MAX_GAME_LEN = int(os.getenv("MAX_GAME_LEN", "120"))
 
-# FIXED: Increased from 2 to 5 for better internet drop tolerance
 END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "5"))
 
 NOTIFY_409_EVERY_SEC = 6 * 60 * 60
@@ -107,7 +106,6 @@ BOT_WARN_PERCENT = float(os.getenv("BOT_WARN_PERCENT", "90"))
 BOT_NOTIFY_COOLDOWN_SEC = int(os.getenv("BOT_NOTIFY_COOLDOWN_SEC", str(6 * 60 * 60)))
 BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
-# FIXED: Reconnect window - if stream returns within 15 min, keep stats
 RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
 
 KICK_API_URL = f"https://kick.com/api/v1/channels/{KICK_SLUG}"
@@ -465,7 +463,6 @@ def reset_stream_session(st: dict) -> None:
     st["end_sent_ts"] = 0
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
-    """FIXED: Handles reconnections within RECONNECT_WINDOW_SEC without resetting stats."""
     if not kick.get("live"):
         return False
     kdt = parse_kick_created_at(kick.get("created_at"))
@@ -831,8 +828,23 @@ def tg_send_chat_action(chat_id: int, thread_id: int | None, action: str) -> Non
     except Exception:
         pass
 
+# ========== INLINE KEYBOARD WITH COLORED BUTTONS (Bot API 9.4+) ==========
 def get_platform_keyboard() -> dict:
-    return {"inline_keyboard": [[{"text": "🎥 Kick", "url": KICK_PUBLIC_URL}, {"text": "🎮 VK Play", "url": VK_PUBLIC_URL}]]}
+    """Create inline keyboard with colored Kick and VK Play buttons.
+    
+    Available styles (Bot API 9.4+):
+    - 'primary': blue (default)
+    - 'success': green
+    - 'danger': red
+    """
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🎥 Kick", "url": KICK_PUBLIC_URL, "style": "success"},    # 🟢 Зелёный
+                {"text": "🎮 VK Play", "url": VK_PUBLIC_URL, "style": "primary"}    # 🔵 Синий
+            ]
+        ]
+    }
 
 def tg_send_to(chat_id: int, thread_id: int | None, text: str, reply_to: int | None = None, with_buttons: bool = True) -> int:
     payload = {"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True, "parse_mode": "HTML"}
@@ -966,7 +978,6 @@ def screenshot_from_m3u8_fast(playback_url: str) -> bytes | None:
         return None
 
 def screenshot_from_m3u8_fresh(playback_url: str) -> bytes | None:
-    """FIXED: Always make fresh screenshot for commands/changes."""
     if not FFMPEG_ENABLED or not playback_url or not ffmpeg_available():
         return None
     cmd = [FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-nostdin", "-ss", str(FFMPEG_SEEK_SEC), "-i", playback_url, "-vframes", "1", "-vf", f"scale={FFMPEG_SCALE}", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
@@ -1350,8 +1361,6 @@ def commands_loop_once():
             thread_id = int(thread_id) if isinstance(thread_id, int) else None
             reply_to = msg.get("message_id")
             reply_to = int(reply_to) if isinstance(reply_to, int) else None
-            
-            # FIXED: Check for empty/whitespace text BEFORE accessing [0]
             text_stripped = text.strip()
             if not text_stripped:
                 continue
@@ -1359,7 +1368,6 @@ def commands_loop_once():
             if not text_parts:
                 continue
             cmd = text_parts[0].split("@")[0]
-
             if cmd in ADMIN_COMMANDS:
                 if not (is_private_chat(msg) and is_admin_msg(msg)):
                     continue
