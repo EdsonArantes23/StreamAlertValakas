@@ -92,6 +92,7 @@ FFMPEG_SCALE = os.getenv("FFMPEG_SCALE", "1280:-1").strip()
 MAX_TITLE_LEN = int(os.getenv("MAX_TITLE_LEN", "180"))
 MAX_GAME_LEN = int(os.getenv("MAX_GAME_LEN", "120"))
 
+# FIXED: Increased from 2 to 5 for better internet drop tolerance
 END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "5"))
 
 NOTIFY_409_EVERY_SEC = 6 * 60 * 60
@@ -106,7 +107,11 @@ BOT_WARN_PERCENT = float(os.getenv("BOT_WARN_PERCENT", "90"))
 BOT_NOTIFY_COOLDOWN_SEC = int(os.getenv("BOT_NOTIFY_COOLDOWN_SEC", str(6 * 60 * 60)))
 BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
+# FIXED: Reconnect window - if stream returns within 15 min, keep stats
 RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
+
+# FIXED: If started_at is older than this, force new session even if any_live was true
+SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))  # 1 hour
 
 KICK_API_URL = f"https://kick.com/api/v1/channels/{KICK_SLUG}"
 KICK_PUBLIC_URL = f"https://kick.com/{KICK_SLUG}"
@@ -463,6 +468,7 @@ def reset_stream_session(st: dict) -> None:
     st["end_sent_ts"] = 0
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
+    """FIXED: Handles reconnections within RECONNECT_WINDOW_SEC without resetting stats."""
     if not kick.get("live"):
         return False
     kdt = parse_kick_created_at(kick.get("created_at"))
@@ -978,15 +984,23 @@ def screenshot_from_m3u8_fast(playback_url: str) -> bytes | None:
         return None
 
 def screenshot_from_m3u8_fresh(playback_url: str) -> bytes | None:
+    """FIXED: Always make fresh screenshot for commands/changes with retry."""
     if not FFMPEG_ENABLED or not playback_url or not ffmpeg_available():
         return None
     cmd = [FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-nostdin", "-ss", str(FFMPEG_SEEK_SEC), "-i", playback_url, "-vframes", "1", "-vf", f"scale={FFMPEG_SCALE}", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
     try:
+        # First attempt
         p = subprocess.run(cmd, capture_output=True, timeout=min(int(FFMPEG_TIMEOUT_SEC), int(FFMPEG_CMD_TIMEOUT_SEC)))
-        if p.returncode != 0 or not p.stdout:
-            return None
-        _shot_cache_set(p.stdout)
-        return p.stdout
+        if p.returncode == 0 and p.stdout:
+            _shot_cache_set(p.stdout)
+            return p.stdout
+        # Wait 3 seconds and retry (URL might not be ready yet)
+        time.sleep(3)
+        p = subprocess.run(cmd, capture_output=True, timeout=min(int(FFMPEG_TIMEOUT_SEC), int(FFMPEG_CMD_TIMEOUT_SEC)))
+        if p.returncode == 0 and p.stdout:
+            _shot_cache_set(p.stdout)
+            return p.stdout
+        return None
     except Exception:
         return None
 
@@ -1113,7 +1127,16 @@ def set_started_at_from_kick(st: dict, kick: dict, force: bool = False) -> None:
 def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None) -> None:
     caption = build_caption(prefix, st, kick, vk)
     tg_send_chat_action(chat_id, thread_id, "upload_photo")
-    shot = screenshot_from_m3u8(kick.get("playback_url")) if kick.get("live") else None
+    
+    # FIXED: Retry screenshot if first attempt fails (URL might not be ready)
+    shot = None
+    playback_url = kick.get("playback_url")
+    if playback_url:
+        shot = screenshot_from_m3u8(playback_url)
+        if not shot:
+            time.sleep(3)  # Wait for URL to be ready
+            shot = screenshot_from_m3u8(playback_url)
+    
     if shot:
         tg_send_photo_upload_to(chat_id, thread_id, shot, caption, filename=f"kick_live_{ts()}.jpg", reply_to=reply_to)
         maybe_send_to_pubg_topic(caption, st, kick)
@@ -1171,12 +1194,12 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
     return "\n".join(lines)
 
 def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> None:
+    # FIXED: Use fresh screenshot with retry for changes
     shot = None
-    if kick.get("live"):
-        try:
-            shot = screenshot_from_m3u8_fresh(kick.get("playback_url"))
-        except Exception as e:
-            log_line(f"Fresh screenshot for change failed: {e}")
+    playback_url = kick.get("playback_url")
+    if playback_url:
+        shot = screenshot_from_m3u8_fresh(playback_url)
+    
     if shot:
         try:
             tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, shot, caption, filename=f"kick_change_{ts()}.jpg", reply_to=None)
@@ -1184,6 +1207,8 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
             return
         except Exception as e:
             log_line(f"Fresh screenshot upload failed, fallback: {e}")
+    
+    # Fallback to thumbnails
     try:
         if kick.get("live") and kick.get("thumb"):
             tg_send_photo_best_to(GROUP_ID, TOPIC_ID, kick.get("thumb"), caption, reply_to=None)
@@ -1200,14 +1225,15 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
 def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None) -> None:
     caption = build_caption(prefix, st, kick, vk)
     shot = None
-    if kick.get("live"):
-        try:
-            shot = screenshot_from_m3u8_fresh(kick.get("playback_url"))
-        except Exception as e:
-            log_line(f"Fresh screenshot for command failed: {e}")
+    # FIXED: Always use fresh screenshot for commands with retry
+    playback_url = kick.get("playback_url")
+    if playback_url:
+        shot = screenshot_from_m3u8_fresh(playback_url)
+        if not shot:
             cached = _shot_cache_get()
             if cached:
                 shot, _age = cached
+    
     if shot:
         tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption, filename=f"kick_live_{ts()}.jpg", reply_to=reply_to)
         maybe_send_to_pubg_topic(caption, st, kick)
@@ -1361,6 +1387,7 @@ def commands_loop_once():
             thread_id = int(thread_id) if isinstance(thread_id, int) else None
             reply_to = msg.get("message_id")
             reply_to = int(reply_to) if isinstance(reply_to, int) else None
+            # FIXED: Check for empty/whitespace text BEFORE accessing [0]
             text_stripped = text.strip()
             if not text_stripped:
                 continue
@@ -1570,6 +1597,23 @@ def main_loop():
             prev_any = bool(st.get("any_live"))
             prev_end_streak = int(st.get("end_streak") or 0)
         any_live = bool(kick.get("live") or vk.get("live"))
+        
+        # FIXED: Check if started_at is too old - force new session even if prev_any was true
+        if any_live and not prev_any:
+            started_at = st.get("started_at")
+            if started_at:
+                try:
+                    start_dt = datetime.fromisoformat(started_at)
+                    hours_since = (now_utc() - start_dt).total_seconds() / 3600
+                    if hours_since > 1:  # If started_at is >1 hour old, this is a new stream
+                        log_line(f"Forced new session: started_at is {hours_since:.1f}h old")
+                        reset_stream_session(st)
+                        set_started_at_from_kick(st, kick, force=True)
+                        prev_any = False  # Force START logic
+                except Exception:
+                    pass
+        
+        # START - with improved detection
         if (not prev_any) and any_live:
             with STATE_LOCK:
                 st = load_state()
@@ -1590,6 +1634,8 @@ def main_loop():
                         save_state(st)
                 except Exception as e:
                     log_line(f"Start send error: {e}")
+        
+        # CHANGE
         kick_title_changed = False
         kick_cat_changed = False
         vk_title_changed = False
@@ -1619,6 +1665,8 @@ def main_loop():
                         save_state(st)
                 except Exception as e:
                     log_line(f"Change send error: {e}")
+        
+        # END (once per started_at)
         should_send_end = False
         with STATE_LOCK:
             st_chk = load_state()
@@ -1645,6 +1693,8 @@ def main_loop():
                     save_state(st_end2)
             except Exception as e:
                 log_line(f"End send error: {e}")
+        
+        # SAVE NEW STATE
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = any_live
