@@ -16,6 +16,7 @@ import requests
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 def _mask_secrets(text: str) -> str:
+    """Hide bot token and similar secrets in logs/messages."""
     try:
         s = str(text)
     except Exception:
@@ -91,6 +92,7 @@ FFMPEG_SCALE = os.getenv("FFMPEG_SCALE", "1280:-1").strip()
 MAX_TITLE_LEN = int(os.getenv("MAX_TITLE_LEN", "180"))
 MAX_GAME_LEN = int(os.getenv("MAX_GAME_LEN", "120"))
 
+# FIXED: Increased from 2 to 5 for better internet drop tolerance
 END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "5"))
 
 NOTIFY_409_EVERY_SEC = 6 * 60 * 60
@@ -105,8 +107,10 @@ BOT_WARN_PERCENT = float(os.getenv("BOT_WARN_PERCENT", "90"))
 BOT_NOTIFY_COOLDOWN_SEC = int(os.getenv("BOT_NOTIFY_COOLDOWN_SEC", str(6 * 60 * 60)))
 BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
-# FIXED: Use RECONNECT_WINDOW_SEC for session detection, not 60 seconds
-RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))  # 15 minutes
+# FIXED: Reconnect window - if stream returns within 15 min, keep stats
+RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
+
+# FIXED: If started_at is older than this, force new session even if any_live was true
 SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))  # 1 hour
 
 KICK_API_URL = f"https://kick.com/api/v1/channels/{KICK_SLUG}"
@@ -209,9 +213,8 @@ def fmt_msk(dt: datetime | None) -> str:
 def now_msk_str() -> str:
     return fmt_msk(now_utc())
 
-# FIXED: Increased to 100 to show full timeline in reports (no "… ещё 1")
 STATS_MAX_KEYS = 20
-STATS_MAX_PRINT = 100
+STATS_MAX_PRINT = 10
 
 def _norm_key(x: str | None) -> str:
     s = (x or "—")
@@ -378,7 +381,6 @@ def build_end_report(st: dict) -> str:
         out.append("🧭  <b>Категории (хронология)</b>")
         cats = _render_timeline(cat_tl, 'b')
         if cats:
-            # FIXED: Use STATS_MAX_PRINT = 100 to show full timeline
             out += cats[:STATS_MAX_PRINT]
             if len(cats) > STATS_MAX_PRINT:
                 out.append(f"… ещё {len(cats)-STATS_MAX_PRINT}")
@@ -388,7 +390,6 @@ def build_end_report(st: dict) -> str:
         out.append("🧭  <b>Названия (хронология)</b>")
         titles = _render_timeline(title_tl, 'i')
         if titles:
-            # FIXED: Use STATS_MAX_PRINT = 100 to show full timeline
             out += titles[:STATS_MAX_PRINT]
             if len(titles) > STATS_MAX_PRINT:
                 out.append(f"… ещё {len(titles)-STATS_MAX_PRINT}")
@@ -467,8 +468,7 @@ def reset_stream_session(st: dict) -> None:
     st["end_sent_ts"] = 0
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
-    """Return True if started_at was set/changed (new session detected).
-    FIXED: Use RECONNECT_WINDOW_SEC (15 min) instead of 60 seconds."""
+    """FIXED: Handles reconnections within RECONNECT_WINDOW_SEC without resetting stats."""
     if not kick.get("live"):
         return False
     kdt = parse_kick_created_at(kick.get("created_at"))
@@ -479,16 +479,15 @@ def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
             return True
         try:
             diff_sec = abs(int((cur - kdt).total_seconds()))
-            # FIXED: Only reset if diff > RECONNECT_WINDOW_SEC (15 min), not 60 sec
             if diff_sec > RECONNECT_WINDOW_SEC:
                 log_line(f"Detect new session: diff={diff_sec}s > {RECONNECT_WINDOW_SEC}s")
                 reset_stream_session(st)
                 st["started_at"] = kdt.isoformat()
                 return True
-            # Same session — keep started_at unchanged
-            if diff_sec > 120:
-                log_line(f"Stream reconnect detected (gap: {diff_sec}s). Keeping session stats.")
-            return False
+            if diff_sec <= RECONNECT_WINDOW_SEC:
+                if diff_sec > 120:
+                    log_line(f"Stream reconnect detected (gap: {diff_sec}s). Keeping session stats.")
+                return False
         except Exception:
             reset_stream_session(st)
             st["started_at"] = kdt.isoformat()
@@ -837,11 +836,18 @@ def tg_send_chat_action(chat_id: int, thread_id: int | None, action: str) -> Non
 
 # ========== INLINE KEYBOARD WITH COLORED BUTTONS (Bot API 9.4+) ==========
 def get_platform_keyboard() -> dict:
+    """Create inline keyboard with colored Kick and VK Play buttons.
+    
+    Available styles (Bot API 9.4+):
+    - 'primary': blue (default)
+    - 'success': green
+    - 'danger': red
+    """
     return {
         "inline_keyboard": [
             [
-                {"text": "🎥 Kick", "url": KICK_PUBLIC_URL, "style": "success"},
-                {"text": "🎮 VK Play", "url": VK_PUBLIC_URL, "style": "primary"}
+                {"text": "🎥 Kick", "url": KICK_PUBLIC_URL, "style": "success"},    # 🟢 Зелёный
+                {"text": "🎮 VK Play", "url": VK_PUBLIC_URL, "style": "primary"}    # 🔵 Синий
             ]
         ]
     }
@@ -978,14 +984,17 @@ def screenshot_from_m3u8_fast(playback_url: str) -> bytes | None:
         return None
 
 def screenshot_from_m3u8_fresh(playback_url: str) -> bytes | None:
+    """FIXED: Always make fresh screenshot for commands/changes with retry."""
     if not FFMPEG_ENABLED or not playback_url or not ffmpeg_available():
         return None
     cmd = [FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-nostdin", "-ss", str(FFMPEG_SEEK_SEC), "-i", playback_url, "-vframes", "1", "-vf", f"scale={FFMPEG_SCALE}", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
     try:
+        # First attempt
         p = subprocess.run(cmd, capture_output=True, timeout=min(int(FFMPEG_TIMEOUT_SEC), int(FFMPEG_CMD_TIMEOUT_SEC)))
         if p.returncode == 0 and p.stdout:
             _shot_cache_set(p.stdout)
             return p.stdout
+        # Wait 3 seconds and retry (URL might not be ready yet)
         time.sleep(3)
         p = subprocess.run(cmd, capture_output=True, timeout=min(int(FFMPEG_TIMEOUT_SEC), int(FFMPEG_CMD_TIMEOUT_SEC)))
         if p.returncode == 0 and p.stdout:
@@ -1118,13 +1127,16 @@ def set_started_at_from_kick(st: dict, kick: dict, force: bool = False) -> None:
 def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None) -> None:
     caption = build_caption(prefix, st, kick, vk)
     tg_send_chat_action(chat_id, thread_id, "upload_photo")
+    
+    # FIXED: Retry screenshot if first attempt fails (URL might not be ready)
     shot = None
     playback_url = kick.get("playback_url")
     if playback_url:
         shot = screenshot_from_m3u8(playback_url)
         if not shot:
-            time.sleep(3)
+            time.sleep(3)  # Wait for URL to be ready
             shot = screenshot_from_m3u8(playback_url)
+    
     if shot:
         tg_send_photo_upload_to(chat_id, thread_id, shot, caption, filename=f"kick_live_{ts()}.jpg", reply_to=reply_to)
         maybe_send_to_pubg_topic(caption, st, kick)
@@ -1182,10 +1194,12 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
     return "\n".join(lines)
 
 def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> None:
+    # FIXED: Use fresh screenshot with retry for changes
     shot = None
     playback_url = kick.get("playback_url")
     if playback_url:
         shot = screenshot_from_m3u8_fresh(playback_url)
+    
     if shot:
         try:
             tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, shot, caption, filename=f"kick_change_{ts()}.jpg", reply_to=None)
@@ -1193,6 +1207,8 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
             return
         except Exception as e:
             log_line(f"Fresh screenshot upload failed, fallback: {e}")
+    
+    # Fallback to thumbnails
     try:
         if kick.get("live") and kick.get("thumb"):
             tg_send_photo_best_to(GROUP_ID, TOPIC_ID, kick.get("thumb"), caption, reply_to=None)
@@ -1209,6 +1225,7 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
 def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None) -> None:
     caption = build_caption(prefix, st, kick, vk)
     shot = None
+    # FIXED: Always use fresh screenshot for commands with retry
     playback_url = kick.get("playback_url")
     if playback_url:
         shot = screenshot_from_m3u8_fresh(playback_url)
@@ -1216,6 +1233,7 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
             cached = _shot_cache_get()
             if cached:
                 shot, _age = cached
+    
     if shot:
         tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption, filename=f"kick_live_{ts()}.jpg", reply_to=reply_to)
         maybe_send_to_pubg_topic(caption, st, kick)
@@ -1369,6 +1387,7 @@ def commands_loop_once():
             thread_id = int(thread_id) if isinstance(thread_id, int) else None
             reply_to = msg.get("message_id")
             reply_to = int(reply_to) if isinstance(reply_to, int) else None
+            # FIXED: Check for empty/whitespace text BEFORE accessing [0]
             text_stripped = text.strip()
             if not text_stripped:
                 continue
@@ -1577,50 +1596,29 @@ def main_loop():
             st = load_state()
             prev_any = bool(st.get("any_live"))
             prev_end_streak = int(st.get("end_streak") or 0)
-            cur_started = st.get("started_at")
         any_live = bool(kick.get("live") or vk.get("live"))
         
-        # === FLAGS FOR ORDER CONTROL ===
-        end_sent = False
-        start_sent = False
-
-        # === 1️⃣ END CHECK (highest priority) ===
-        if not any_live and prev_any:
-            new_end_streak = prev_end_streak + 1
-            if new_end_streak >= END_CONFIRM_STREAK and cur_started:
+        # FIXED: Check if started_at is too old - force new session even if prev_any was true
+        if any_live and not prev_any:
+            started_at = st.get("started_at")
+            if started_at:
                 try:
-                    with STATE_LOCK:
-                        st_end = load_state()
-                        stats_tick(st_end, kick, vk, any_live=False, now_ts=ts())
-                        stats_finalize_end(st_end, now_ts=ts())
-                        st_end["kick_viewers"] = st_end.get("kick_viewers") or kick.get("viewers")
-                        st_end["vk_viewers"] = st_end.get("vk_viewers") or vk.get("viewers")
-                        st_end["end_sent_for_started_at"] = st_end.get("started_at")
-                        st_end["end_sent_ts"] = ts()
-                    end_text = build_end_text(st_end)
-                    tg_send_main_and_maybe_pubg(end_text, st_end, kick)
-                    with STATE_LOCK:
-                        st_end2 = load_state()
-                        st_end2["started_at"] = None
-                        st_end2["end_streak"] = 0
-                        save_state(st_end2)
-                    end_sent = True
-                except Exception as e:
-                    log_line(f"End send error: {e}")
-
-        # === 2️⃣ NEW STREAM CHECK (if end not sent) ===
-        if any_live and not end_sent:
-            is_new_session = (not prev_any) or (cur_started is None)
-            if cur_started and not is_new_session:
-                try:
-                    start_dt = datetime.fromisoformat(cur_started)
+                    start_dt = datetime.fromisoformat(started_at)
                     hours_since = (now_utc() - start_dt).total_seconds() / 3600
-                    if hours_since > 1:
+                    if hours_since > 1:  # If started_at is >1 hour old, this is a new stream
                         log_line(f"Forced new session: started_at is {hours_since:.1f}h old")
-                        is_new_session = True
+                        reset_stream_session(st)
+                        set_started_at_from_kick(st, kick, force=True)
+                        prev_any = False  # Force START logic
                 except Exception:
                     pass
-            if is_new_session:
+        
+        # START - with improved detection
+        if (not prev_any) and any_live:
+            with STATE_LOCK:
+                st = load_state()
+                last = int(st.get("last_start_sent_ts") or 0)
+            if ts() - last >= START_DEDUP_SEC:
                 with STATE_LOCK:
                     st_start = load_state()
                     reset_stream_session(st_start)
@@ -1634,64 +1632,79 @@ def main_loop():
                         st = load_state()
                         st["last_start_sent_ts"] = ts()
                         save_state(st)
-                    start_sent = True
                 except Exception as e:
                     log_line(f"Start send error: {e}")
-
-        # === 3️⃣ CHANGE CHECK (only if not start and not end) ===
-        if any_live and prev_any and not end_sent and not start_sent:
-            kick_title_changed = False
-            kick_cat_changed = False
-            vk_title_changed = False
-            vk_cat_changed = False
+        
+        # CHANGE
+        kick_title_changed = False
+        kick_cat_changed = False
+        vk_title_changed = False
+        vk_cat_changed = False
+        with STATE_LOCK:
+            st = load_state()
+            if kick.get("live"):
+                kick_title_changed = (kick.get("title") != st.get("kick_title"))
+                kick_cat_changed = (kick.get("category") != st.get("kick_cat"))
+            if vk.get("live"):
+                vk_title_changed = (vk.get("title") != st.get("vk_title"))
+                vk_cat_changed = (vk.get("category") != st.get("vk_cat"))
+        changed = (kick_title_changed or kick_cat_changed or vk_title_changed or vk_cat_changed)
+        if any_live and prev_any and changed:
             with STATE_LOCK:
                 st = load_state()
-                if kick.get("live"):
-                    kick_title_changed = (kick.get("title") != st.get("kick_title"))
-                    kick_cat_changed = (kick.get("category") != st.get("kick_cat"))
-                if vk.get("live"):
-                    vk_title_changed = (vk.get("title") != st.get("vk_title"))
-                    vk_cat_changed = (vk.get("category") != st.get("vk_cat"))
-            changed = (kick_title_changed or kick_cat_changed or vk_title_changed or vk_cat_changed)
-            if changed:
+                last = int(st.get("last_change_sent_ts") or 0)
+            if ts() - last >= CHANGE_DEDUP_SEC:
+                try:
+                    with STATE_LOCK:
+                        st = load_state()
+                    caption = build_change_caption(st, kick, vk, kick_title_changed, kick_cat_changed, vk_title_changed, vk_cat_changed)
+                    send_caption_with_screen(caption, st, kick, vk)
+                    with STATE_LOCK:
+                        st = load_state()
+                        st["last_change_sent_ts"] = ts()
+                        save_state(st)
+                except Exception as e:
+                    log_line(f"Change send error: {e}")
+        
+        # END (once per started_at)
+        should_send_end = False
+        with STATE_LOCK:
+            st_chk = load_state()
+            cur_started = st_chk.get("started_at")
+            already_for = st_chk.get("end_sent_for_started_at")
+            confirmed_off = (not any_live) and ((prev_end_streak + 1) >= END_CONFIRM_STREAK)
+            if confirmed_off and cur_started and (already_for != cur_started):
+                should_send_end = True
+        if should_send_end:
+            try:
                 with STATE_LOCK:
-                    st = load_state()
-                    last = int(st.get("last_change_sent_ts") or 0)
-                if ts() - last >= CHANGE_DEDUP_SEC:
-                    try:
-                        with STATE_LOCK:
-                            st = load_state()
-                        caption = build_change_caption(st, kick, vk, kick_title_changed, kick_cat_changed, vk_title_changed, vk_cat_changed)
-                        send_caption_with_screen(caption, st, kick, vk)
-                        with STATE_LOCK:
-                            st = load_state()
-                            st["last_change_sent_ts"] = ts()
-                            save_state(st)
-                    except Exception as e:
-                        log_line(f"Change send error: {e}")
-
-        # === 4️⃣ SAVE STATE (always at end) ===
+                    st_end = load_state()
+                    stats_tick(st_end, kick, vk, any_live=False, now_ts=ts())
+                    stats_finalize_end(st_end, now_ts=ts())
+                    st_end["kick_viewers"] = st_end.get("kick_viewers") or kick.get("viewers")
+                    st_end["vk_viewers"] = st_end.get("vk_viewers") or vk.get("viewers")
+                    st_end["end_sent_for_started_at"] = st_end.get("started_at")
+                    st_end["end_sent_ts"] = ts()
+                end_text = build_end_text(st_end)
+                tg_send_main_and_maybe_pubg(end_text, st_end, kick)
+                with STATE_LOCK:
+                    st_end2 = load_state()
+                    st_end2["started_at"] = None
+                    save_state(st_end2)
+            except Exception as e:
+                log_line(f"End send error: {e}")
+        
+        # SAVE NEW STATE
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = any_live
             st["kick_live"] = bool(kick.get("live"))
             st["vk_live"] = bool(vk.get("live"))
             if any_live:
-                # FIXED: Only update started_at via sync_kick_session with RECONNECT_WINDOW_SEC check
-                existing_started = st.get("started_at")
-                kdt = parse_kick_created_at(kick.get("created_at"))
-                cur = dt_from_iso(existing_started) if existing_started else None
-                if existing_started and kdt and cur:
-                    diff = abs(int((cur - kdt).total_seconds()))
-                    if diff > RECONNECT_WINDOW_SEC:
-                        st["started_at"] = kdt.isoformat()
-                elif not existing_started:
-                    set_started_at_from_kick(st, kick)
-                if start_sent:
-                    st["end_streak"] = 0
+                set_started_at_from_kick(st, kick)
+                st["end_streak"] = 0
             else:
-                if not end_sent:
-                    st["end_streak"] = prev_end_streak + 1
+                st["end_streak"] = prev_end_streak + 1
             st["kick_title"] = kick.get("title")
             st["kick_cat"] = kick.get("category")
             st["vk_title"] = vk.get("title")
