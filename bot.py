@@ -16,7 +16,6 @@ import requests
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 def _mask_secrets(text: str) -> str:
-    """Hide bot token and similar secrets in logs/messages."""
     try:
         s = str(text)
     except Exception:
@@ -106,8 +105,9 @@ BOT_WARN_PERCENT = float(os.getenv("BOT_WARN_PERCENT", "90"))
 BOT_NOTIFY_COOLDOWN_SEC = int(os.getenv("BOT_NOTIFY_COOLDOWN_SEC", str(6 * 60 * 60)))
 BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
-RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
-SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))
+# FIXED: Use RECONNECT_WINDOW_SEC for session detection, not 60 seconds
+RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))  # 15 minutes
+SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))  # 1 hour
 
 KICK_API_URL = f"https://kick.com/api/v1/channels/{KICK_SLUG}"
 KICK_PUBLIC_URL = f"https://kick.com/{KICK_SLUG}"
@@ -209,7 +209,7 @@ def fmt_msk(dt: datetime | None) -> str:
 def now_msk_str() -> str:
     return fmt_msk(now_utc())
 
-# FIXED: Increased to 100 to show full timeline in reports (was 10)
+# FIXED: Increased to 100 to show full timeline in reports (no "… ещё 1")
 STATS_MAX_KEYS = 20
 STATS_MAX_PRINT = 100
 
@@ -378,7 +378,7 @@ def build_end_report(st: dict) -> str:
         out.append("🧭  <b>Категории (хронология)</b>")
         cats = _render_timeline(cat_tl, 'b')
         if cats:
-            # FIXED: Use STATS_MAX_PRINT = 100 to show more items
+            # FIXED: Use STATS_MAX_PRINT = 100 to show full timeline
             out += cats[:STATS_MAX_PRINT]
             if len(cats) > STATS_MAX_PRINT:
                 out.append(f"… ещё {len(cats)-STATS_MAX_PRINT}")
@@ -388,7 +388,7 @@ def build_end_report(st: dict) -> str:
         out.append("🧭  <b>Названия (хронология)</b>")
         titles = _render_timeline(title_tl, 'i')
         if titles:
-            # FIXED: Use STATS_MAX_PRINT = 100 to show more items
+            # FIXED: Use STATS_MAX_PRINT = 100 to show full timeline
             out += titles[:STATS_MAX_PRINT]
             if len(titles) > STATS_MAX_PRINT:
                 out.append(f"… ещё {len(titles)-STATS_MAX_PRINT}")
@@ -467,6 +467,8 @@ def reset_stream_session(st: dict) -> None:
     st["end_sent_ts"] = 0
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
+    """Return True if started_at was set/changed (new session detected).
+    FIXED: Use RECONNECT_WINDOW_SEC (15 min) instead of 60 seconds."""
     if not kick.get("live"):
         return False
     kdt = parse_kick_created_at(kick.get("created_at"))
@@ -477,17 +479,16 @@ def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
             return True
         try:
             diff_sec = abs(int((cur - kdt).total_seconds()))
-            if diff_sec <= 60:
-                return False
+            # FIXED: Only reset if diff > RECONNECT_WINDOW_SEC (15 min), not 60 sec
             if diff_sec > RECONNECT_WINDOW_SEC:
                 log_line(f"Detect new session: diff={diff_sec}s > {RECONNECT_WINDOW_SEC}s")
                 reset_stream_session(st)
                 st["started_at"] = kdt.isoformat()
                 return True
-            if diff_sec <= RECONNECT_WINDOW_SEC:
-                if diff_sec > 120:
-                    log_line(f"Stream reconnect detected (gap: {diff_sec}s). Keeping session stats.")
-                return False
+            # Same session — keep started_at unchanged
+            if diff_sec > 120:
+                log_line(f"Stream reconnect detected (gap: {diff_sec}s). Keeping session stats.")
+            return False
         except Exception:
             reset_stream_session(st)
             st["started_at"] = kdt.isoformat()
@@ -834,6 +835,7 @@ def tg_send_chat_action(chat_id: int, thread_id: int | None, action: str) -> Non
     except Exception:
         pass
 
+# ========== INLINE KEYBOARD WITH COLORED BUTTONS (Bot API 9.4+) ==========
 def get_platform_keyboard() -> dict:
     return {
         "inline_keyboard": [
@@ -1578,9 +1580,11 @@ def main_loop():
             cur_started = st.get("started_at")
         any_live = bool(kick.get("live") or vk.get("live"))
         
+        # === FLAGS FOR ORDER CONTROL ===
         end_sent = False
         start_sent = False
 
+        # === 1️⃣ END CHECK (highest priority) ===
         if not any_live and prev_any:
             new_end_streak = prev_end_streak + 1
             if new_end_streak >= END_CONFIRM_STREAK and cur_started:
@@ -1604,6 +1608,7 @@ def main_loop():
                 except Exception as e:
                     log_line(f"End send error: {e}")
 
+        # === 2️⃣ NEW STREAM CHECK (if end not sent) ===
         if any_live and not end_sent:
             is_new_session = (not prev_any) or (cur_started is None)
             if cur_started and not is_new_session:
@@ -1633,6 +1638,7 @@ def main_loop():
                 except Exception as e:
                     log_line(f"Start send error: {e}")
 
+        # === 3️⃣ CHANGE CHECK (only if not start and not end) ===
         if any_live and prev_any and not end_sent and not start_sent:
             kick_title_changed = False
             kick_cat_changed = False
@@ -1664,12 +1670,14 @@ def main_loop():
                     except Exception as e:
                         log_line(f"Change send error: {e}")
 
+        # === 4️⃣ SAVE STATE (always at end) ===
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = any_live
             st["kick_live"] = bool(kick.get("live"))
             st["vk_live"] = bool(vk.get("live"))
             if any_live:
+                # FIXED: Only update started_at via sync_kick_session with RECONNECT_WINDOW_SEC check
                 existing_started = st.get("started_at")
                 kdt = parse_kick_created_at(kick.get("created_at"))
                 cur = dt_from_iso(existing_started) if existing_started else None
