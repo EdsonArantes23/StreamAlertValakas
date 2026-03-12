@@ -106,9 +106,8 @@ BOT_WARN_PERCENT = float(os.getenv("BOT_WARN_PERCENT", "90"))
 BOT_NOTIFY_COOLDOWN_SEC = int(os.getenv("BOT_NOTIFY_COOLDOWN_SEC", str(6 * 60 * 60)))
 BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
-# ========== RECONNECT LOGIC CONFIG ==========
-RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))  # 15 minutes
-SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))  # 1 hour
+RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
+SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))
 
 KICK_API_URL = f"https://kick.com/api/v1/channels/{KICK_SLUG}"
 KICK_PUBLIC_URL = f"https://kick.com/{KICK_SLUG}"
@@ -210,9 +209,9 @@ def fmt_msk(dt: datetime | None) -> str:
 def now_msk_str() -> str:
     return fmt_msk(now_utc())
 
-# FIXED: Increased STATS_MAX_PRINT to show more timeline items in reports
+# FIXED: Increased to 100 to show full timeline in reports (was 10)
 STATS_MAX_KEYS = 20
-STATS_MAX_PRINT = 50  # Was 10, now 50 — shows more categories/titles in end report
+STATS_MAX_PRINT = 100
 
 def _norm_key(x: str | None) -> str:
     s = (x or "—")
@@ -379,7 +378,7 @@ def build_end_report(st: dict) -> str:
         out.append("🧭  <b>Категории (хронология)</b>")
         cats = _render_timeline(cat_tl, 'b')
         if cats:
-            # FIXED: Use STATS_MAX_PRINT = 50 to show more items
+            # FIXED: Use STATS_MAX_PRINT = 100 to show more items
             out += cats[:STATS_MAX_PRINT]
             if len(cats) > STATS_MAX_PRINT:
                 out.append(f"… ещё {len(cats)-STATS_MAX_PRINT}")
@@ -389,7 +388,7 @@ def build_end_report(st: dict) -> str:
         out.append("🧭  <b>Названия (хронология)</b>")
         titles = _render_timeline(title_tl, 'i')
         if titles:
-            # FIXED: Use STATS_MAX_PRINT = 50 to show more items
+            # FIXED: Use STATS_MAX_PRINT = 100 to show more items
             out += titles[:STATS_MAX_PRINT]
             if len(titles) > STATS_MAX_PRINT:
                 out.append(f"… ещё {len(titles)-STATS_MAX_PRINT}")
@@ -478,6 +477,8 @@ def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
             return True
         try:
             diff_sec = abs(int((cur - kdt).total_seconds()))
+            if diff_sec <= 60:
+                return False
             if diff_sec > RECONNECT_WINDOW_SEC:
                 log_line(f"Detect new session: diff={diff_sec}s > {RECONNECT_WINDOW_SEC}s")
                 reset_stream_session(st)
@@ -1577,11 +1578,9 @@ def main_loop():
             cur_started = st.get("started_at")
         any_live = bool(kick.get("live") or vk.get("live"))
         
-        # === FLAGS FOR ORDER CONTROL ===
         end_sent = False
         start_sent = False
 
-        # === 1️⃣ END CHECK (highest priority) ===
         if not any_live and prev_any:
             new_end_streak = prev_end_streak + 1
             if new_end_streak >= END_CONFIRM_STREAK and cur_started:
@@ -1596,7 +1595,6 @@ def main_loop():
                         st_end["end_sent_ts"] = ts()
                     end_text = build_end_text(st_end)
                     tg_send_main_and_maybe_pubg(end_text, st_end, kick)
-                    # ✅ Clear started_at and reset end_streak ONLY after successful send
                     with STATE_LOCK:
                         st_end2 = load_state()
                         st_end2["started_at"] = None
@@ -1606,7 +1604,6 @@ def main_loop():
                 except Exception as e:
                     log_line(f"End send error: {e}")
 
-        # === 2️⃣ NEW STREAM CHECK (if end not sent) ===
         if any_live and not end_sent:
             is_new_session = (not prev_any) or (cur_started is None)
             if cur_started and not is_new_session:
@@ -1636,7 +1633,6 @@ def main_loop():
                 except Exception as e:
                     log_line(f"Start send error: {e}")
 
-        # === 3️⃣ CHANGE CHECK (only if not start and not end) ===
         if any_live and prev_any and not end_sent and not start_sent:
             kick_title_changed = False
             kick_cat_changed = False
@@ -1668,14 +1664,21 @@ def main_loop():
                     except Exception as e:
                         log_line(f"Change send error: {e}")
 
-        # === 4️⃣ SAVE STATE (always at end) ===
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = any_live
             st["kick_live"] = bool(kick.get("live"))
             st["vk_live"] = bool(vk.get("live"))
             if any_live:
-                sync_kick_session(st, kick)
+                existing_started = st.get("started_at")
+                kdt = parse_kick_created_at(kick.get("created_at"))
+                cur = dt_from_iso(existing_started) if existing_started else None
+                if existing_started and kdt and cur:
+                    diff = abs(int((cur - kdt).total_seconds()))
+                    if diff > RECONNECT_WINDOW_SEC:
+                        st["started_at"] = kdt.isoformat()
+                elif not existing_started:
+                    set_started_at_from_kick(st, kick)
                 if start_sent:
                     st["end_streak"] = 0
             else:
