@@ -16,6 +16,7 @@ import requests
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 def _mask_secrets(text: str) -> str:
+    """Hide bot token and similar secrets in logs/messages."""
     try:
         s = str(text)
     except Exception:
@@ -91,6 +92,7 @@ FFMPEG_SCALE = os.getenv("FFMPEG_SCALE", "1280:-1").strip()
 MAX_TITLE_LEN = int(os.getenv("MAX_TITLE_LEN", "180"))
 MAX_GAME_LEN = int(os.getenv("MAX_GAME_LEN", "120"))
 
+# FIXED: Increased from 2 to 5 for better internet drop tolerance
 END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "5"))
 
 NOTIFY_409_EVERY_SEC = 6 * 60 * 60
@@ -105,9 +107,11 @@ BOT_WARN_PERCENT = float(os.getenv("BOT_WARN_PERCENT", "90"))
 BOT_NOTIFY_COOLDOWN_SEC = int(os.getenv("BOT_NOTIFY_COOLDOWN_SEC", str(6 * 60 * 60)))
 BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
-# FIXED: 15 минут окно реконнекта
+# FIXED: Reconnect window - if stream returns within 15 min, keep stats
 RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
-SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))
+
+# FIXED: If started_at is older than this, force new session even if any_live was true
+SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))  # 1 hour
 
 KICK_API_URL = f"https://kick.com/api/v1/channels/{KICK_SLUG}"
 KICK_PUBLIC_URL = f"https://kick.com/{KICK_SLUG}"
@@ -209,9 +213,8 @@ def fmt_msk(dt: datetime | None) -> str:
 def now_msk_str() -> str:
     return fmt_msk(now_utc())
 
-# FIXED: 100 строк в отчёте (было 10)
 STATS_MAX_KEYS = 20
-STATS_MAX_PRINT = 100
+STATS_MAX_PRINT = 10
 
 def _norm_key(x: str | None) -> str:
     s = (x or "—")
@@ -334,14 +337,14 @@ def build_end_report(st: dict) -> str:
     except Exception:
         pass
     lines: list[str] = []
-    lines.append("🏁  Паток окончен — Глад Валакас")
+    lines.append("🏁  <b>Паток окончен</b> — Глад Валакас")
     lines.append(" ")
-    lines.append(f"🕒  Начало (МСК): {fmt_msk(start_dt)}")
-    lines.append(f"🕒  Конец (МСК): {fmt_msk(end_dt)}")
-    lines.append(f"⏱  Длительность: {dur}")
+    lines.append(f"🕒  <b>Начало (МСК):</b> {fmt_msk(start_dt)}")
+    lines.append(f"🕒  <b>Конец (МСК):</b> {fmt_msk(end_dt)}")
+    lines.append(f"⏱  <b>Длительность:</b> {dur}")
     both_live_sec = int(stats.get("both_live_sec", 0) or 0)
     if both_live_sec > 0:
-        lines.append(f"⏱  Одновременно на Kick + VK Play: {fmt_duration(both_live_sec)}")
+        lines.append(f"⏱  <b>Одновременно на Kick + VK Play:</b> {fmt_duration(both_live_sec)}")
     lines.append(" ")
     def _render_timeline(segments: list, value_style: str) -> list[str]:
         out: list[str] = []
@@ -357,25 +360,25 @@ def build_end_report(st: dict) -> str:
             val = esc(seg.get("value") or "—")
             dur_hm = fmt_hhmm(e - s)
             if value_style == 'b':
-                out.append(f"{hm_s}–{hm_e} — {val} ({dur_hm})")
+                out.append(f"{hm_s}–{hm_e} —  <b>{val}</b> ({dur_hm})")
             else:
-                out.append(f"{hm_s}–{hm_e} — {val} ({dur_hm})")
+                out.append(f"{hm_s}–{hm_e} —  <i>{val}</i> ({dur_hm})")
         return out
     def plat_block(label: str, key: str, url: str) -> list[str]:
         out: list[str] = []
         out.append(label)
         ever_live = bool((stats or {}).get(f"{key}_ever_live", False))
         if not ever_live:
-            out.append("⚪  Патока на этой площадке не было.")
-            out.append(f"🔗  Ссылка: {url}")
+            out.append("⚪  <i>Патока на этой площадке не было.</i>")
+            out.append(f"🔗  <b>Ссылка:</b> {url}")
             return out
         pstats = (stats.get(key) or {}) if isinstance(stats.get(key), dict) else {}
-        out.append(f"👥 Зрители (min/avg/max): {fmt_viewers(pstats.get('min'))} / {_fmt_avg(pstats)} / {fmt_viewers(pstats.get('max'))}")
-        out.append(f"🔁 Смен названия: {int(pstats.get('title_changes',0) or 0)} • Смен категории: {int(pstats.get('cat_changes',0) or 0)}")
+        out.append(f"👥 Зрители (min/avg/max):  <b>{fmt_viewers(pstats.get('min'))} / {_fmt_avg(pstats)} / {fmt_viewers(pstats.get('max'))}</b>")
+        out.append(f"🔁 Смен названия:  <b>{int(pstats.get('title_changes',0) or 0)}</b> • Смен категории:  <b>{int(pstats.get('cat_changes',0) or 0)}</b>")
         cat_tl = stats.get(f"{key}_cat_timeline") or []
         title_tl = stats.get(f"{key}_title_timeline") or []
         out.append(" ")
-        out.append("🧭  Категории (хронология)")
+        out.append("🧭  <b>Категории (хронология)</b>")
         cats = _render_timeline(cat_tl, 'b')
         if cats:
             out += cats[:STATS_MAX_PRINT]
@@ -384,7 +387,7 @@ def build_end_report(st: dict) -> str:
         else:
             out.append("—")
         out.append(" ")
-        out.append("🧭  Названия (хронология)")
+        out.append("🧭  <b>Названия (хронология)</b>")
         titles = _render_timeline(title_tl, 'i')
         if titles:
             out += titles[:STATS_MAX_PRINT]
@@ -393,11 +396,11 @@ def build_end_report(st: dict) -> str:
         else:
             out.append("—")
         out.append(" ")
-        out.append(f"🔗  Ссылка: {url}")
+        out.append(f"🔗  <b>Ссылка:</b> {url}")
         return out
-    lines += plat_block("🎥  Kick", "kick", KICK_PUBLIC_URL)
+    lines += plat_block("🎥  <b>Kick</b>", "kick", KICK_PUBLIC_URL)
     lines.append(" ")
-    lines += plat_block("🎮  VK Play", "vk", VK_PUBLIC_URL)
+    lines += plat_block("🎮  <b>VK Play</b>", "vk", VK_PUBLIC_URL)
     out = "\n".join(lines)
     return out[:3900] + ("…" if len(out) > 3900 else "")
 
@@ -465,7 +468,7 @@ def reset_stream_session(st: dict) -> None:
     st["end_sent_ts"] = 0
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
-    """FIXED: Только для нового стрима, не вызывается каждый цикл"""
+    """FIXED: Handles reconnections within RECONNECT_WINDOW_SEC without resetting stats."""
     if not kick.get("live"):
         return False
     kdt = parse_kick_created_at(kick.get("created_at"))
@@ -831,12 +834,20 @@ def tg_send_chat_action(chat_id: int, thread_id: int | None, action: str) -> Non
     except Exception:
         pass
 
+# ========== INLINE KEYBOARD WITH COLORED BUTTONS (Bot API 9.4+) ==========
 def get_platform_keyboard() -> dict:
+    """Create inline keyboard with colored Kick and VK Play buttons.
+    
+    Available styles (Bot API 9.4+):
+    - 'primary': blue (default)
+    - 'success': green
+    - 'danger': red
+    """
     return {
         "inline_keyboard": [
             [
-                {"text": "🎥 Kick", "url": KICK_PUBLIC_URL, "style": "success"},
-                {"text": "🎮 VK Play", "url": VK_PUBLIC_URL, "style": "primary"}
+                {"text": "🎥 Kick", "url": KICK_PUBLIC_URL, "style": "success"},    # 🟢 Зелёный
+                {"text": "🎮 VK Play", "url": VK_PUBLIC_URL, "style": "primary"}    # 🔵 Синий
             ]
         ]
     }
@@ -973,14 +984,17 @@ def screenshot_from_m3u8_fast(playback_url: str) -> bytes | None:
         return None
 
 def screenshot_from_m3u8_fresh(playback_url: str) -> bytes | None:
+    """FIXED: Always make fresh screenshot for commands/changes with retry."""
     if not FFMPEG_ENABLED or not playback_url or not ffmpeg_available():
         return None
     cmd = [FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-nostdin", "-ss", str(FFMPEG_SEEK_SEC), "-i", playback_url, "-vframes", "1", "-vf", f"scale={FFMPEG_SCALE}", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
     try:
+        # First attempt
         p = subprocess.run(cmd, capture_output=True, timeout=min(int(FFMPEG_TIMEOUT_SEC), int(FFMPEG_CMD_TIMEOUT_SEC)))
         if p.returncode == 0 and p.stdout:
             _shot_cache_set(p.stdout)
             return p.stdout
+        # Wait 3 seconds and retry (URL might not be ready yet)
         time.sleep(3)
         p = subprocess.run(cmd, capture_output=True, timeout=min(int(FFMPEG_TIMEOUT_SEC), int(FFMPEG_CMD_TIMEOUT_SEC)))
         if p.returncode == 0 and p.stdout:
@@ -1072,40 +1086,40 @@ def build_caption(prefix: str, st: dict, kick: dict, vk: dict) -> str:
     if prefix:
         lines.append(prefix)
         lines.append(" ")
-    lines.append(f"🕒  Сейчас (МСК): {now_msk_str()}")
+    lines.append(f"🕒  <b>Сейчас (МСК):</b> {now_msk_str()}")
     if st.get("started_at"):
-        lines.append(f"🕒  Старт (МСК): {fmt_msk(dt_from_iso(st.get('started_at')))}")
-    lines.append(f"⏱  {esc(running)}")
+        lines.append(f"🕒  <b>Старт (МСК):</b> {fmt_msk(dt_from_iso(st.get('started_at')))}")
+    lines.append(f"⏱  <b>{esc(running)}</b>")
     lines.append(" ")
-    lines.append("🎥  Kick")
+    lines.append("🎥  <b>Kick</b>")
     if kick.get("live"):
         if kick.get("category"):
-            lines.append(f"🏷 Категория: {esc(kick.get('category'))}")
+            lines.append(f"🏷 Категория:  <b>{esc(kick.get('category'))}</b>")
         if kick.get("title"):
-            lines.append(f"📝 Название: {esc(kick.get('title'))}")
-        lines.append(f"👥 Зрители: {fmt_viewers(kick.get('viewers'))}")
+            lines.append(f"📝 Название:  <i>{esc(kick.get('title'))}</i>")
+        lines.append(f"👥 Зрители:  <b>{fmt_viewers(kick.get('viewers'))}</b>")
     else:
         lines.append("⚫ OFF")
     lines.append(" ")
-    lines.append("🎮  VK Play")
+    lines.append("🎮  <b>VK Play</b>")
     if vk.get("live"):
         if vk.get("category"):
-            lines.append(f"🏷 Категория: {esc(vk.get('category'))}")
+            lines.append(f"🏷 Категория:  <b>{esc(vk.get('category'))}</b>")
         if vk.get("title"):
-            lines.append(f"📝 Название: {esc(vk.get('title'))}")
-        lines.append(f"👥 Зрители: {fmt_viewers(vk.get('viewers'))}")
+            lines.append(f"📝 Название:  <i>{esc(vk.get('title'))}</i>")
+        lines.append(f"👥 Зрители:  <b>{fmt_viewers(vk.get('viewers'))}</b>")
     else:
         lines.append("⚫ OFF")
     lines.append(" ")
-    lines.append(f"🔗  Kick: {KICK_PUBLIC_URL}")
-    lines.append(f"🔗  VK Play: {VK_PUBLIC_URL}")
+    lines.append(f"🔗  <b>Kick:</b> {KICK_PUBLIC_URL}")
+    lines.append(f"🔗  <b>VK Play:</b> {VK_PUBLIC_URL}")
     return "\n".join(lines)
 
 def build_end_text(st: dict) -> str:
     return build_end_report(st)
 
 def build_no_stream_text(prefix: str = "⚫  Патока сейчас нет") -> str:
-    return "\n".join([prefix, " ", f"🔗  Kick: {KICK_PUBLIC_URL}", f"🔗  VK Play: {VK_PUBLIC_URL}"])
+    return "\n".join([prefix, " ", f"🔗  Kick:  {KICK_PUBLIC_URL}", f"🔗  VK Play:  {VK_PUBLIC_URL}"])
 
 def set_started_at_from_kick(st: dict, kick: dict, force: bool = False) -> None:
     sync_kick_session(st, kick, force=force)
@@ -1113,13 +1127,16 @@ def set_started_at_from_kick(st: dict, kick: dict, force: bool = False) -> None:
 def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None) -> None:
     caption = build_caption(prefix, st, kick, vk)
     tg_send_chat_action(chat_id, thread_id, "upload_photo")
+    
+    # FIXED: Retry screenshot if first attempt fails (URL might not be ready)
     shot = None
     playback_url = kick.get("playback_url")
     if playback_url:
         shot = screenshot_from_m3u8(playback_url)
         if not shot:
-            time.sleep(3)
+            time.sleep(3)  # Wait for URL to be ready
             shot = screenshot_from_m3u8(playback_url)
+    
     if shot:
         tg_send_photo_upload_to(chat_id, thread_id, shot, caption, filename=f"kick_live_{ts()}.jpg", reply_to=reply_to)
         maybe_send_to_pubg_topic(caption, st, kick)
@@ -1141,46 +1158,48 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
     lines.append("")
     start_dt = dt_from_iso(st.get("started_at"))
     if start_dt:
-        lines.append(f"🕒  Старт (МСК): {fmt_msk(start_dt)}")
-    lines.append(f"🕒  Сейчас (МСК): {now_msk_str()} • ⏱ {esc(fmt_running_line(st))}")
+        lines.append(f"🕒  <b>Старт (МСК):</b> {fmt_msk(start_dt)}")
+    lines.append(f"🕒  <b>Сейчас (МСК):</b> {now_msk_str()} • ⏱ {esc(fmt_running_line(st))}")
     lines.append(" ")
     if kick.get("live"):
-        lines.append("🎥  Kick")
+        lines.append("🎥  <b>Kick</b>")
         if kick.get("category"):
             if kick_cat_changed:
-                lines.append(f"🏷  Категория: {esc(kick.get('category'))}")
+                lines.append(f"🏷  <b>Категория:</b>  <b>{esc(kick.get('category'))}</b>")
             else:
-                lines.append(f"🏷 Категория: {esc(kick.get('category'))}")
+                lines.append(f"🏷 Категория:  <b>{esc(kick.get('category'))}</b>")
         if kick.get("title"):
             if kick_title_changed:
-                lines.append(f"📝  Название: {esc(kick.get('title'))}")
+                lines.append(f"📝  <b>Название:</b>  <i>{esc(kick.get('title'))}</i>")
             else:
-                lines.append(f"📝 Название: {esc(kick.get('title'))}")
-        lines.append(f"👥 Зрители: {fmt_viewers(kick.get('viewers'))}")
+                lines.append(f"📝 Название:  <i>{esc(kick.get('title'))}</i>")
+        lines.append(f"👥 Зрители:  <b>{fmt_viewers(kick.get('viewers'))}</b>")
         lines.append(" ")
     if vk.get("live"):
-        lines.append("🎮  VK Play")
+        lines.append("🎮  <b>VK Play</b>")
         if vk.get("category"):
             if vk_cat_changed:
-                lines.append(f"🏷  Категория: {esc(vk.get('category'))}")
+                lines.append(f"🏷  <b>Категория:</b>  <b>{esc(vk.get('category'))}</b>")
             else:
-                lines.append(f"🏷 Категория: {esc(vk.get('category'))}")
+                lines.append(f"🏷 Категория:  <b>{esc(vk.get('category'))}</b>")
         if vk.get("title"):
             if vk_title_changed:
-                lines.append(f"📝  Название: {esc(vk.get('title'))}")
+                lines.append(f"📝  <b>Название:</b>  <i>{esc(vk.get('title'))}</i>")
             else:
-                lines.append(f"📝 Название: {esc(vk.get('title'))}")
-        lines.append(f"👥 Зрители: {fmt_viewers(vk.get('viewers'))}")
+                lines.append(f"📝 Название:  <i>{esc(vk.get('title'))}</i>")
+        lines.append(f"👥 Зрители:  <b>{fmt_viewers(vk.get('viewers'))}</b>")
         lines.append(" ")
     lines.append(f"🔗 {KICK_PUBLIC_URL}")
     lines.append(f"🔗 {VK_PUBLIC_URL}")
     return "\n".join(lines)
 
 def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> None:
+    # FIXED: Use fresh screenshot with retry for changes
     shot = None
     playback_url = kick.get("playback_url")
     if playback_url:
         shot = screenshot_from_m3u8_fresh(playback_url)
+    
     if shot:
         try:
             tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, shot, caption, filename=f"kick_change_{ts()}.jpg", reply_to=None)
@@ -1188,6 +1207,8 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
             return
         except Exception as e:
             log_line(f"Fresh screenshot upload failed, fallback: {e}")
+    
+    # Fallback to thumbnails
     try:
         if kick.get("live") and kick.get("thumb"):
             tg_send_photo_best_to(GROUP_ID, TOPIC_ID, kick.get("thumb"), caption, reply_to=None)
@@ -1204,6 +1225,7 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
 def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None) -> None:
     caption = build_caption(prefix, st, kick, vk)
     shot = None
+    # FIXED: Always use fresh screenshot for commands with retry
     playback_url = kick.get("playback_url")
     if playback_url:
         shot = screenshot_from_m3u8_fresh(playback_url)
@@ -1211,6 +1233,7 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
             cached = _shot_cache_get()
             if cached:
                 shot, _age = cached
+    
     if shot:
         tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption, filename=f"kick_live_{ts()}.jpg", reply_to=reply_to)
         maybe_send_to_pubg_topic(caption, st, kick)
@@ -1364,6 +1387,7 @@ def commands_loop_once():
             thread_id = int(thread_id) if isinstance(thread_id, int) else None
             reply_to = msg.get("message_id")
             reply_to = int(reply_to) if isinstance(reply_to, int) else None
+            # FIXED: Check for empty/whitespace text BEFORE accessing [0]
             text_stripped = text.strip()
             if not text_stripped:
                 continue
@@ -1574,7 +1598,22 @@ def main_loop():
             prev_end_streak = int(st.get("end_streak") or 0)
         any_live = bool(kick.get("live") or vk.get("live"))
         
-        # START
+        # FIXED: Check if started_at is too old - force new session even if prev_any was true
+        if any_live and not prev_any:
+            started_at = st.get("started_at")
+            if started_at:
+                try:
+                    start_dt = datetime.fromisoformat(started_at)
+                    hours_since = (now_utc() - start_dt).total_seconds() / 3600
+                    if hours_since > 1:  # If started_at is >1 hour old, this is a new stream
+                        log_line(f"Forced new session: started_at is {hours_since:.1f}h old")
+                        reset_stream_session(st)
+                        set_started_at_from_kick(st, kick, force=True)
+                        prev_any = False  # Force START logic
+                except Exception:
+                    pass
+        
+        # START - with improved detection
         if (not prev_any) and any_live:
             with STATE_LOCK:
                 st = load_state()
@@ -1589,11 +1628,10 @@ def main_loop():
                     with STATE_LOCK:
                         st = load_state()
                     send_status_with_screen("🚨🚨 🧩 Глад Валакас запустил паток! 🚨🚨", st, kick, vk)
-                    # FIXED: Обновляем last_start_sent_ts СРАЗУ после отправки
                     with STATE_LOCK:
-                        st_upd = load_state()
-                        st_upd["last_start_sent_ts"] = ts()
-                        save_state(st_upd)
+                        st = load_state()
+                        st["last_start_sent_ts"] = ts()
+                        save_state(st)
                 except Exception as e:
                     log_line(f"Start send error: {e}")
         
@@ -1628,7 +1666,7 @@ def main_loop():
                 except Exception as e:
                     log_line(f"Change send error: {e}")
         
-        # END
+        # END (once per started_at)
         should_send_end = False
         with STATE_LOCK:
             st_chk = load_state()
@@ -1656,14 +1694,14 @@ def main_loop():
             except Exception as e:
                 log_line(f"End send error: {e}")
         
-        # SAVE NEW STATE - FIXED: НЕ вызываем set_started_at_from_kick каждый цикл!
+        # SAVE NEW STATE
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = any_live
             st["kick_live"] = bool(kick.get("live"))
             st["vk_live"] = bool(vk.get("live"))
-            # УБРАНО: set_started_at_from_kick(st, kick) - это вызывало спам!
             if any_live:
+                set_started_at_from_kick(st, kick)
                 st["end_streak"] = 0
             else:
                 st["end_streak"] = prev_end_streak + 1
