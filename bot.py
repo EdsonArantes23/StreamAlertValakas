@@ -105,6 +105,7 @@ BOT_WARN_PERCENT = float(os.getenv("BOT_WARN_PERCENT", "90"))
 BOT_NOTIFY_COOLDOWN_SEC = int(os.getenv("BOT_NOTIFY_COOLDOWN_SEC", str(6 * 60 * 60)))
 BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
+# FIXED: 15 минут окно реконнекта
 RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
 SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))
 
@@ -208,7 +209,7 @@ def fmt_msk(dt: datetime | None) -> str:
 def now_msk_str() -> str:
     return fmt_msk(now_utc())
 
-# FIXED: 100 строк в отчёте
+# FIXED: 100 строк в отчёте (было 10)
 STATS_MAX_KEYS = 20
 STATS_MAX_PRINT = 100
 
@@ -464,6 +465,7 @@ def reset_stream_session(st: dict) -> None:
     st["end_sent_ts"] = 0
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
+    """FIXED: Только для нового стрима, не вызывается каждый цикл"""
     if not kick.get("live"):
         return False
     kdt = parse_kick_created_at(kick.get("created_at"))
@@ -1133,7 +1135,6 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
     tg_send_to(chat_id, thread_id, caption, reply_to=reply_to)
     maybe_send_to_pubg_topic(caption, st, kick)
 
-# FIXED: Жирный шрифт для изменений
 def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: bool, kick_cat_changed: bool, vk_title_changed: bool, vk_cat_changed: bool) -> str:
     lines: list[str] = []
     
@@ -1591,19 +1592,8 @@ def main_loop():
             prev_any = bool(st.get("any_live"))
             prev_end_streak = int(st.get("end_streak") or 0)
         any_live = bool(kick.get("live") or vk.get("live"))
-        if any_live and not prev_any:
-            started_at = st.get("started_at")
-            if started_at:
-                try:
-                    start_dt = datetime.fromisoformat(started_at)
-                    hours_since = (now_utc() - start_dt).total_seconds() / 3600
-                    if hours_since > 1:
-                        log_line(f"Forced new session: started_at is {hours_since:.1f}h old")
-                        reset_stream_session(st)
-                        set_started_at_from_kick(st, kick, force=True)
-                        prev_any = False
-                except Exception:
-                    pass
+        
+        # START
         if (not prev_any) and any_live:
             with STATE_LOCK:
                 st = load_state()
@@ -1624,6 +1614,8 @@ def main_loop():
                         save_state(st)
                 except Exception as e:
                     log_line(f"Start send error: {e}")
+        
+        # CHANGE
         kick_title_changed = False
         kick_cat_changed = False
         vk_title_changed = False
@@ -1653,6 +1645,8 @@ def main_loop():
                         save_state(st)
                 except Exception as e:
                     log_line(f"Change send error: {e}")
+        
+        # END
         should_send_end = False
         with STATE_LOCK:
             st_chk = load_state()
@@ -1679,13 +1673,15 @@ def main_loop():
                     save_state(st_end2)
             except Exception as e:
                 log_line(f"End send error: {e}")
+        
+        # SAVE NEW STATE - FIXED: НЕ вызываем set_started_at_from_kick каждый цикл!
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = any_live
             st["kick_live"] = bool(kick.get("live"))
             st["vk_live"] = bool(vk.get("live"))
+            # УБРАНО: set_started_at_from_kick(st, kick) - это вызывало сброс started_at!
             if any_live:
-                set_started_at_from_kick(st, kick)
                 st["end_streak"] = 0
             else:
                 st["end_streak"] = prev_end_streak + 1
