@@ -105,7 +105,6 @@ BOT_WARN_PERCENT = float(os.getenv("BOT_WARN_PERCENT", "90"))
 BOT_NOTIFY_COOLDOWN_SEC = int(os.getenv("BOT_NOTIFY_COOLDOWN_SEC", str(6 * 60 * 60)))
 BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
-# FIXED: 15 минут окно реконнекта
 RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
 SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))
 
@@ -357,9 +356,9 @@ def build_end_report(st: dict) -> str:
             val = esc(seg.get("value") or "—")
             dur_hm = fmt_hhmm(e - s)
             if value_style == 'b':
-                out.append(f"{hm_s}–{hm_e} — {val} ({dur_hm})")
+                out.append(f"{hm_s}–{hm_e} — <b>{val}</b> ({dur_hm})")
             else:
-                out.append(f"{hm_s}–{hm_e} — {val} ({dur_hm})")
+                out.append(f"{hm_s}–{hm_e} — <i>{val}</i> ({dur_hm})")
         return out
     def plat_block(label: str, key: str, url: str) -> list[str]:
         out: list[str] = []
@@ -370,8 +369,8 @@ def build_end_report(st: dict) -> str:
             out.append(f"🔗 Ссылка: {url}")
             return out
         pstats = (stats.get(key) or {}) if isinstance(stats.get(key), dict) else {}
-        out.append(f"👥 Зрители (min/avg/max): {fmt_viewers(pstats.get('min'))} / {_fmt_avg(pstats)} / {fmt_viewers(pstats.get('max'))}")
-        out.append(f"🔁 Смен названия: {int(pstats.get('title_changes',0) or 0)} • Смен категории: {int(pstats.get('cat_changes',0) or 0)}")
+        out.append(f"👥 Зрители (min/avg/max): <b>{fmt_viewers(pstats.get('min'))}</b> / <b>{_fmt_avg(pstats)}</b> / <b>{fmt_viewers(pstats.get('max'))}</b>")
+        out.append(f"🔁 Смен названия: <b>{int(pstats.get('title_changes',0) or 0)}</b> • Смен категории: <b>{int(pstats.get('cat_changes',0) or 0)}</b>")
         cat_tl = stats.get(f"{key}_cat_timeline") or []
         title_tl = stats.get(f"{key}_title_timeline") or []
         out.append(" ")
@@ -465,7 +464,6 @@ def reset_stream_session(st: dict) -> None:
     st["end_sent_ts"] = 0
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
-    """FIXED: Только для нового стрима, не вызывается каждый цикл"""
     if not kick.get("live"):
         return False
     kdt = parse_kick_created_at(kick.get("created_at"))
@@ -1029,7 +1027,9 @@ def _find_container_with_streaminfo(obj):
                 return found
     return None
 
+# FIXED: Улучшенная детекция стримов на VK Play
 def vk_fetch_best_effort() -> dict:
+    """FIXED: Improved VK Play live detection with multiple fallbacks."""
     r = http_request_ext("GET", VK_PUBLIC_URL, headers=HEADERS_HTML, timeout=25, allow_redirects=True)
     html = r.text
     title = None
@@ -1037,6 +1037,8 @@ def vk_fetch_best_effort() -> dict:
     viewers = None
     thumb = None
     live = False
+    
+    # Method 1: Parse __NEXT_DATA__ (primary)
     m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
@@ -1045,26 +1047,71 @@ def vk_fetch_best_effort() -> dict:
             if container:
                 ch = container.get("channelInfo") or {}
                 si = container.get("streamInfo") or {}
-                status = str(ch.get("status") or " ").upper()
-                live = status in {"ONLINE", "LIVE", "STREAMING"}
-                title = si.get("title") or title
-                catobj = si.get("category") or {}
+                
+                # FIXED: More flexible status check + additional live indicators
+                status = str(ch.get("status") or ch.get("streamStatus") or " ").upper()
+                is_live_flag = si.get("isLive") or si.get("is_live") or ch.get("isLive")
+                
+                # Check multiple possible live indicators
+                live = (
+                    status in {"ONLINE", "LIVE", "STREAMING", "TRUE", "1", "ACTIVE"} or
+                    is_live_flag is True or
+                    is_live_flag == "true" or
+                    si.get("state") == "LIVE"
+                )
+                
+                title = si.get("title") or ch.get("title") or title
+                catobj = si.get("category") or ch.get("category") or {}
                 if isinstance(catobj, dict):
-                    category = catobj.get("title") or category
-                cnt = si.get("counters") or {}
+                    category = catobj.get("title") or catobj.get("name") or category
+                
+                # Get viewers from multiple possible fields
+                cnt = si.get("counters") or si.get("stats") or ch.get("counters") or {}
                 if isinstance(cnt, dict):
-                    viewers = cnt.get("viewers") or viewers
+                    viewers = (cnt.get("viewers") or cnt.get("online") or 
+                              cnt.get("viewersCount") or cnt.get("onlineCount"))
+                
+                # If viewers > 0, definitely live (secondary confirmation)
                 if isinstance(viewers, int) and viewers > 0:
                     live = True
-        except Exception:
-            pass
+                    
+        except Exception as e:
+            log_line(f"VK __NEXT_DATA__ parse error: {e}")
+    
+    # Method 2: Fallback - check for live stream meta tags
+    if not live:
+        if re.search(r'property="og:type"[^>]+content="video\.other"', html, re.I) or \
+           re.search(r'property="og:video:type"[^>]+content="application/x-mpegURL"', html, re.I) or \
+           re.search(r'"isLive"[^:]*:\s*true', html, re.I) or \
+           re.search(r'"live"[^:]*:\s*true', html, re.I):
+            live = True
+            log_line("VK: detected live via meta tag fallback")
+    
+    # Method 3: Extract info from Open Graph tags (always try)
     m_img = re.search(r'property="og:image"[^>]+content="([^"]+)"', html, re.IGNORECASE)
     if m_img:
         thumb = m_img.group(1).strip()
+    
     m_title = re.search(r'property="og:title"[^>]+content="([^"]+)"', html, re.IGNORECASE)
     if m_title and not title:
         title = m_title.group(1).strip()
-    return {"live": bool(live), "title": trim(title, MAX_TITLE_LEN), "category": trim(category, MAX_GAME_LEN), "viewers": viewers, "thumb": thumb}
+    
+    # Try to extract category from page text as last resort
+    if not category:
+        cat_match = re.search(r'["\']?category["\']?\s*[:=]\s*["\']([^"\']+)["\']', html, re.I)
+        if cat_match:
+            category = cat_match.group(1)
+    
+    # Log detection result for debugging
+    log_line(f"VK fetch: live={live}, title={title[:50] if title else None}, cat={category}, viewers={viewers}")
+    
+    return {
+        "live": bool(live),
+        "title": trim(title, MAX_TITLE_LEN),
+        "category": trim(category, MAX_GAME_LEN),
+        "viewers": viewers,
+        "thumb": thumb
+    }
 
 def build_caption(prefix: str, st: dict, kick: dict, vk: dict) -> str:
     running = fmt_running_line(st)
@@ -1080,20 +1127,20 @@ def build_caption(prefix: str, st: dict, kick: dict, vk: dict) -> str:
     lines.append("🎥 Kick")
     if kick.get("live"):
         if kick.get("category"):
-            lines.append(f"🏷 Категория: {esc(kick.get('category'))}")
+            lines.append(f"🏷 Категория: <b>{esc(kick.get('category'))}</b>")
         if kick.get("title"):
-            lines.append(f"📝 Название: {esc(kick.get('title'))}")
-        lines.append(f"👥 Зрители: {fmt_viewers(kick.get('viewers'))}")
+            lines.append(f"📝 Название: <i>{esc(kick.get('title'))}</i>")
+        lines.append(f"👥 Зрители: <b>{fmt_viewers(kick.get('viewers'))}</b>")
     else:
         lines.append("⚫ OFF")
     lines.append(" ")
     lines.append("🎮 VK Play")
     if vk.get("live"):
         if vk.get("category"):
-            lines.append(f"🏷 Категория: {esc(vk.get('category'))}")
+            lines.append(f"🏷 Категория: <b>{esc(vk.get('category'))}</b>")
         if vk.get("title"):
-            lines.append(f"📝 Название: {esc(vk.get('title'))}")
-        lines.append(f"👥 Зрители: {fmt_viewers(vk.get('viewers'))}")
+            lines.append(f"📝 Название: <i>{esc(vk.get('title'))}</i>")
+        lines.append(f"👥 Зрители: <b>{fmt_viewers(vk.get('viewers'))}</b>")
     else:
         lines.append("⚫ OFF")
     lines.append(" ")
@@ -1135,6 +1182,7 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
     tg_send_to(chat_id, thread_id, caption, reply_to=reply_to)
     maybe_send_to_pubg_topic(caption, st, kick)
 
+# FIXED: Показывает что именно обновилось (категория/название) + жирный шрифт
 def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: bool, kick_cat_changed: bool, vk_title_changed: bool, vk_cat_changed: bool) -> str:
     lines: list[str] = []
     
@@ -1168,14 +1216,14 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
             if kick_cat_changed:
                 lines.append(f"🏷 <b>Категория:</b> <b>{esc(kick.get('category'))}</b>")
             else:
-                lines.append(f"🏷 Категория: {esc(kick.get('category'))}")
+                lines.append(f"🏷 Категория: <b>{esc(kick.get('category'))}</b>")
         if kick.get("title"):
             # FIXED: Курсив для изменённого названия
             if kick_title_changed:
                 lines.append(f"📝 <b>Название:</b> <i>{esc(kick.get('title'))}</i>")
             else:
-                lines.append(f"📝 Название: {esc(kick.get('title'))}")
-        lines.append(f"👥 Зрители: {fmt_viewers(kick.get('viewers'))}")
+                lines.append(f"📝 Название: <i>{esc(kick.get('title'))}</i>")
+        lines.append(f"👥 Зрители: <b>{fmt_viewers(kick.get('viewers'))}</b>")
         lines.append(" ")
     if vk.get("live"):
         lines.append("🎮 VK Play")
@@ -1183,13 +1231,13 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
             if vk_cat_changed:
                 lines.append(f"🏷 <b>Категория:</b> <b>{esc(vk.get('category'))}</b>")
             else:
-                lines.append(f"🏷 Категория: {esc(vk.get('category'))}")
+                lines.append(f"🏷 Категория: <b>{esc(vk.get('category'))}</b>")
         if vk.get("title"):
             if vk_title_changed:
                 lines.append(f"📝 <b>Название:</b> <i>{esc(vk.get('title'))}</i>")
             else:
-                lines.append(f"📝 Название: {esc(vk.get('title'))}")
-        lines.append(f"👥 Зрители: {fmt_viewers(vk.get('viewers'))}")
+                lines.append(f"📝 Название: <i>{esc(vk.get('title'))}</i>")
+        lines.append(f"👥 Зрители: <b>{fmt_viewers(vk.get('viewers'))}</b>")
         lines.append(" ")
     lines.append(f"🔗 {KICK_PUBLIC_URL}")
     lines.append(f"🔗 {VK_PUBLIC_URL}")
