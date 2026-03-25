@@ -1029,16 +1029,46 @@ def _find_container_with_streaminfo(obj):
 
 # FIXED: Улучшенная детекция стримов на VK Play
 def vk_fetch_best_effort() -> dict:
-    """FIXED: Improved VK Play live detection with multiple fallbacks."""
-    r = http_request_ext("GET", VK_PUBLIC_URL, headers=HEADERS_HTML, timeout=25, allow_redirects=True)
-    html = r.text
+    headers = dict(HEADERS_HTML)
+    headers.update({
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    })
+    
+    try:
+        r = http_request_ext("GET", VK_PUBLIC_URL, headers=headers, timeout=25, allow_redirects=True)
+        html = r.text
+    except Exception as e:
+        log_line(f"VK fetch HTTP error: {e}")
+        return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
+    
     title = None
     category = None
     viewers = None
     thumb = None
     live = False
     
-    # Method 1: Parse __NEXT_DATA__ (primary)
+    # Indicator 1: og:type for VK Live
+    if re.search(r'property=["\']?og:type["\']?[^>]+content=["\']?ya:ovs:broadcast', html, re.I):
+        live = True
+        log_line("VK: detected live via og:type=ya:ovs:broadcast")
+    
+    # Indicator 2: meta description with viewers count
+    desc_match = re.search(r'<meta[^>]+name=["\']?description["\']?[^>]+content=["\']([^"\']+)["\']', html, re.I)
+    if desc_match:
+        desc = desc_match.group(1)
+        vm = re.search(r'(\d+)\s*зрител', desc, re.I)
+        if vm:
+            viewers = int(vm.group(1))
+            if viewers > 0:
+                live = True
+                log_line(f"VK: detected live via description viewers={viewers}")
+    
+    # Indicator 3: __NEXT_DATA__ (fallback)
     m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
@@ -1048,53 +1078,39 @@ def vk_fetch_best_effort() -> dict:
                 ch = container.get("channelInfo") or {}
                 si = container.get("streamInfo") or {}
                 
-                # FIXED: More flexible status check + additional live indicators
                 status = str(ch.get("status") or ch.get("streamStatus") or " ").upper()
                 is_live_flag = si.get("isLive") or si.get("is_live") or ch.get("isLive")
                 
-                # Check multiple possible live indicators
-                live = (
-                    status in {"ONLINE", "LIVE", "STREAMING", "TRUE", "1", "ACTIVE"} or
-                    is_live_flag is True or
-                    is_live_flag == "true" or
-                    si.get("state") == "LIVE"
-                )
+                if status in {"ONLINE", "LIVE", "STREAMING"} or is_live_flag is True:
+                    live = True
                 
                 title = si.get("title") or ch.get("title") or title
                 catobj = si.get("category") or ch.get("category") or {}
                 if isinstance(catobj, dict):
                     category = catobj.get("title") or catobj.get("name") or category
                 
-                # Get viewers from multiple possible fields
-                cnt = si.get("counters") or si.get("stats") or ch.get("counters") or {}
+                cnt = si.get("counters") or si.get("stats") or {}
                 if isinstance(cnt, dict):
-                    viewers = (cnt.get("viewers") or cnt.get("online") or 
-                              cnt.get("viewersCount") or cnt.get("onlineCount"))
-                
-                # If viewers > 0, definitely live (secondary confirmation)
-                if isinstance(viewers, int) and viewers > 0:
-                    live = True
-                    
+                    v = cnt.get("viewers") or cnt.get("online") or cnt.get("viewersCount")
+                    if isinstance(v, int) and v > 0:
+                        viewers = v
+                        live = True
         except Exception as e:
-            log_line(f"VK __NEXT_DATA__ parse error: {e}")
+            log_line(f"VK __NEXT_DATA__ parse: {e}")
     
-    # Method 2: Fallback - check for live stream meta tags
-    if not live:
-        if re.search(r'property="og:type"[^>]+content="video\.other"', html, re.I) or \
-           re.search(r'property="og:video:type"[^>]+content="application/x-mpegURL"', html, re.I) or \
-           re.search(r'"isLive"[^:]*:\s*true', html, re.I) or \
-           re.search(r'"live"[^:]*:\s*true', html, re.I):
-            live = True
-            log_line("VK: detected live via meta tag fallback")
+    # Indicator 4: Check for browser check page
+    if re.search(r'проверяем ваш браузер|проверка|captcha|challenge', html, re.I):
+        log_line("VK: browser check/captcha detected — may affect detection")
     
-    # Method 3: Extract info from Open Graph tags (always try)
-    m_img = re.search(r'property="og:image"[^>]+content="([^"]+)"', html, re.IGNORECASE)
+    # Extract title/thumb from OG tags (always)
+    m_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.I)
     if m_img:
         thumb = m_img.group(1).strip()
     
-    m_title = re.search(r'property="og:title"[^>]+content="([^"]+)"', html, re.IGNORECASE)
+    m_title = re.search(r'property=["\']?og:title["\']?[^>]+content=["\']([^"\']+)["\']', html, re.I)
     if m_title and not title:
         title = m_title.group(1).strip()
+        title = re.sub(r'\s*на\s+VK\s+Видео\s+Live\s*$', '', title, flags=re.I).strip()
     
     # Try to extract category from page text as last resort
     if not category:
@@ -1102,8 +1118,8 @@ def vk_fetch_best_effort() -> dict:
         if cat_match:
             category = cat_match.group(1)
     
-    # Log detection result for debugging
-    log_line(f"VK fetch: live={live}, title={title[:50] if title else None}, cat={category}, viewers={viewers}")
+    # Final log
+    log_line(f"VK result: live={live}, title={title[:40] if title else None}, cat={category}, viewers={viewers}")
     
     return {
         "live": bool(live),
@@ -1212,13 +1228,11 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
     if kick.get("live"):
         lines.append("🎥 Kick")
         if kick.get("category"):
-            # FIXED: Жирный шрифт для изменённой категории
             if kick_cat_changed:
                 lines.append(f"🏷 <b>Категория:</b> <b>{esc(kick.get('category'))}</b>")
             else:
                 lines.append(f"🏷 Категория: <b>{esc(kick.get('category'))}</b>")
         if kick.get("title"):
-            # FIXED: Курсив для изменённого названия
             if kick_title_changed:
                 lines.append(f"📝 <b>Название:</b> <i>{esc(kick.get('title'))}</i>")
             else:
