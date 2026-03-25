@@ -1052,23 +1052,50 @@ def vk_fetch_best_effort() -> dict:
     thumb = None
     live = False
     
-    # Indicator 1: og:type for VK Live
+    # Indicator 1: og:type for VK Live broadcast
     if re.search(r'property=["\']?og:type["\']?[^>]+content=["\']?ya:ovs:broadcast', html, re.I):
         live = True
         log_line("VK: detected live via og:type=ya:ovs:broadcast")
     
-    # Indicator 2: meta description with viewers count
+    # Indicator 2: Extract from meta description
+    # Format: "Глад Валакас стримит Говорим и смотрим на VK Видео Live прямо сейчас! 414 зрителей."
     desc_match = re.search(r'<meta[^>]+name=["\']?description["\']?[^>]+content=["\']([^"\']+)["\']', html, re.I)
     if desc_match:
         desc = desc_match.group(1)
+        log_line(f"VK description: {desc[:100]}")
+        
+        # Extract viewers count: "414 зрителей"
         vm = re.search(r'(\d+)\s*зрител', desc, re.I)
         if vm:
             viewers = int(vm.group(1))
             if viewers > 0:
                 live = True
-                log_line(f"VK: detected live via description viewers={viewers}")
+        
+        # Extract category: text between "стримит" and "на VK"
+        cat_match = re.search(r'стримит\s+(.+?)\s+на\s+VK', desc, re.I)
+        if cat_match:
+            category = cat_match.group(1).strip()
+            log_line(f"VK category extracted: {category}")
+        
+        # Extract title: channel name before "стримит"
+        if not title:
+            title_match = re.search(r'^(.+?)\s+стримит', desc, re.I)
+            if title_match:
+                title = title_match.group(1).strip()
+                log_line(f"VK title extracted: {title}")
     
-    # Indicator 3: __NEXT_DATA__ (fallback)
+    # Indicator 3: Extract from og:title
+    # Format: "Глад Валакас на VK Видео Live"
+    og_title_match = re.search(r'property=["\']?og:title["\']?[^>]+content=["\']([^"\']+)["\']', html, re.I)
+    if og_title_match:
+        og_title = og_title_match.group(1).strip()
+        # Remove "на VK Видео Live" suffix
+        clean_title = re.sub(r'\s+на\s+VK\s+Видео\s+Live\s*$', '', og_title, flags=re.I).strip()
+        if clean_title and not title:
+            title = clean_title
+        log_line(f"VK og:title: {og_title} -> cleaned: {clean_title}")
+    
+    # Indicator 4: Try __NEXT_DATA__ as fallback
     m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
@@ -1078,53 +1105,45 @@ def vk_fetch_best_effort() -> dict:
                 ch = container.get("channelInfo") or {}
                 si = container.get("streamInfo") or {}
                 
-                status = str(ch.get("status") or ch.get("streamStatus") or " ").upper()
-                is_live_flag = si.get("isLive") or si.get("is_live") or ch.get("isLive")
-                
-                if status in {"ONLINE", "LIVE", "STREAMING"} or is_live_flag is True:
+                # Additional live checks
+                status = str(ch.get("status") or " ").upper()
+                if status in {"ONLINE", "LIVE", "STREAMING"}:
                     live = True
                 
-                title = si.get("title") or ch.get("title") or title
-                catobj = si.get("category") or ch.get("category") or {}
-                if isinstance(catobj, dict):
-                    category = catobj.get("title") or catobj.get("name") or category
+                # Get title from streamInfo if not already found
+                if not title:
+                    title = si.get("title") or ch.get("title")
                 
-                cnt = si.get("counters") or si.get("stats") or {}
-                if isinstance(cnt, dict):
-                    v = cnt.get("viewers") or cnt.get("online") or cnt.get("viewersCount")
-                    if isinstance(v, int) and v > 0:
-                        viewers = v
-                        live = True
+                # Get category from streamInfo if not already found
+                if not category:
+                    catobj = si.get("category") or ch.get("category") or {}
+                    if isinstance(catobj, dict):
+                        category = catobj.get("title") or catobj.get("name")
+                
+                # Get viewers from counters
+                if viewers is None:
+                    cnt = si.get("counters") or si.get("stats") or {}
+                    if isinstance(cnt, dict):
+                        v = cnt.get("viewers") or cnt.get("online") or cnt.get("viewersCount")
+                        if isinstance(v, int) and v > 0:
+                            viewers = v
+                            live = True
         except Exception as e:
-            log_line(f"VK __NEXT_DATA__ parse: {e}")
+            log_line(f"VK __NEXT_DATA__ parse error: {e}")
     
-    # Indicator 4: Check for browser check page
-    if re.search(r'проверяем ваш браузер|проверка|captcha|challenge', html, re.I):
-        log_line("VK: browser check/captcha detected — may affect detection")
-    
-    # Extract title/thumb from OG tags (always)
-    m_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.I)
+    # Get thumbnail from og:image
+    m_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
     if m_img:
         thumb = m_img.group(1).strip()
+        log_line(f"VK thumbnail: {thumb[:80]}")
     
-    m_title = re.search(r'property=["\']?og:title["\']?[^>]+content=["\']([^"\']+)["\']', html, re.I)
-    if m_title and not title:
-        title = m_title.group(1).strip()
-        title = re.sub(r'\s*на\s+VK\s+Видео\s+Live\s*$', '', title, flags=re.I).strip()
-    
-    # Try to extract category from page text as last resort
-    if not category:
-        cat_match = re.search(r'["\']?category["\']?\s*[:=]\s*["\']([^"\']+)["\']', html, re.I)
-        if cat_match:
-            category = cat_match.group(1)
-    
-    # Final log
-    log_line(f"VK result: live={live}, title={title[:40] if title else None}, cat={category}, viewers={viewers}")
+    # Final logging
+    log_line(f"VK final result: live={live}, title='{title}', category='{category}', viewers={viewers}")
     
     return {
         "live": bool(live),
-        "title": trim(title, MAX_TITLE_LEN),
-        "category": trim(category, MAX_GAME_LEN),
+        "title": trim(title, MAX_TITLE_LEN) if title else None,
+        "category": trim(category, MAX_GAME_LEN) if category else None,
         "viewers": viewers,
         "thumb": thumb
     }
@@ -1176,6 +1195,18 @@ def set_started_at_from_kick(st: dict, kick: dict, force: bool = False) -> None:
 def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None) -> None:
     caption = build_caption(prefix, st, kick, vk)
     tg_send_chat_action(chat_id, thread_id, "upload_photo")
+    
+    # FIXED: Для VK Play используем только thumbnail (ffmpeg не работает)
+    if vk.get("live") and vk.get("thumb"):
+        try:
+            img = download_image(vk.get("thumb"))
+            tg_send_photo_upload_to(chat_id, thread_id, img, caption, filename=f"vk_thumb_{ts()}.jpg", reply_to=reply_to)
+        except Exception:
+            tg_send_photo_url_to(chat_id, thread_id, vk.get("thumb"), caption, reply_to=reply_to)
+        maybe_send_to_pubg_topic(caption, st, kick)
+        return
+    
+    # Для Kick пробуем скриншот через ffmpeg
     shot = None
     playback_url = kick.get("playback_url")
     if playback_url:
@@ -1183,6 +1214,7 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
         if not shot:
             time.sleep(3)
             shot = screenshot_from_m3u8(playback_url)
+    
     if shot:
         tg_send_photo_upload_to(chat_id, thread_id, shot, caption, filename=f"kick_live_{ts()}.jpg", reply_to=reply_to)
         maybe_send_to_pubg_topic(caption, st, kick)
@@ -1191,10 +1223,7 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
         tg_send_photo_best_to(chat_id, thread_id, kick["thumb"], caption, reply_to=reply_to)
         maybe_send_to_pubg_topic(caption, st, kick)
         return
-    if vk.get("live") and vk.get("thumb"):
-        tg_send_photo_best_to(chat_id, thread_id, vk["thumb"], caption, reply_to=reply_to)
-        maybe_send_to_pubg_topic(caption, st, kick)
-        return
+    
     tg_send_to(chat_id, thread_id, caption, reply_to=reply_to)
     maybe_send_to_pubg_topic(caption, st, kick)
 
@@ -1228,11 +1257,13 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
     if kick.get("live"):
         lines.append("🎥 Kick")
         if kick.get("category"):
+            # FIXED: Жирный шрифт для изменённой категории
             if kick_cat_changed:
                 lines.append(f"🏷 <b>Категория:</b> <b>{esc(kick.get('category'))}</b>")
             else:
                 lines.append(f"🏷 Категория: <b>{esc(kick.get('category'))}</b>")
         if kick.get("title"):
+            # FIXED: Курсив для изменённого названия
             if kick_title_changed:
                 lines.append(f"📝 <b>Название:</b> <i>{esc(kick.get('title'))}</i>")
             else:
@@ -1258,6 +1289,17 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
     return "\n".join(lines)
 
 def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> None:
+    # FIXED: Для VK Play используем только thumbnail
+    if vk.get("live") and vk.get("thumb"):
+        try:
+            img = download_image(vk.get("thumb"))
+            tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, img, caption, filename=f"vk_thumb_{ts()}.jpg", reply_to=None)
+            maybe_send_to_pubg_topic(caption, st, kick)
+            return
+        except Exception as e:
+            log_line(f"VK thumb upload failed: {e}")
+    
+    # Для Kick пробуем скриншот
     shot = None
     playback_url = kick.get("playback_url")
     if playback_url:
@@ -1269,13 +1311,10 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
             return
         except Exception as e:
             log_line(f"Fresh screenshot upload failed, fallback: {e}")
+    
     try:
         if kick.get("live") and kick.get("thumb"):
             tg_send_photo_best_to(GROUP_ID, TOPIC_ID, kick.get("thumb"), caption, reply_to=None)
-            maybe_send_to_pubg_topic(caption, st, kick)
-            return
-        if vk.get("live") and vk.get("thumb"):
-            tg_send_photo_best_to(GROUP_ID, TOPIC_ID, vk.get("thumb"), caption, reply_to=None)
             maybe_send_to_pubg_topic(caption, st, kick)
             return
     except Exception:
@@ -1284,6 +1323,18 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
 
 def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None) -> None:
     caption = build_caption(prefix, st, kick, vk)
+    
+    # FIXED: Для VK Play используем только thumbnail
+    if vk.get("live") and vk.get("thumb"):
+        try:
+            img = download_image(vk.get("thumb"))
+            tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"vk_thumb_{ts()}.jpg", reply_to=reply_to)
+        except Exception:
+            tg_send_photo_url_to_cmd(chat_id, thread_id, vk.get("thumb"), caption, reply_to=reply_to)
+        maybe_send_to_pubg_topic(caption, st, kick)
+        return
+    
+    # Для Kick пробуем скриншот
     shot = None
     playback_url = kick.get("playback_url")
     if playback_url:
@@ -1304,14 +1355,7 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
             tg_send_photo_url_to_cmd(chat_id, thread_id, kick.get("thumb"), caption, reply_to=reply_to)
         maybe_send_to_pubg_topic(caption, st, kick)
         return
-    if vk.get("live") and vk.get("thumb"):
-        try:
-            img = download_image(vk.get("thumb"))
-            tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
-        except Exception:
-            tg_send_photo_url_to_cmd(chat_id, thread_id, vk.get("thumb"), caption, reply_to=reply_to)
-        maybe_send_to_pubg_topic(caption, st, kick)
-        return
+    
     tg_send_to_cmd(chat_id, thread_id, caption, reply_to=reply_to)
     maybe_send_to_pubg_topic(caption, st, kick)
 
