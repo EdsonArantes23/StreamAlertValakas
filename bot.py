@@ -217,11 +217,15 @@ def _norm_key(x: str | None) -> str:
     return s if s else "—"
 
 def _clean_stream_title(title: str | None) -> str | None:
+    """Очистить название стрима от имени стримера."""
     if not title:
         return None
     title = str(title).strip()
+    # Удаляем "Глад Валакас" из начала
     title = re.sub(r'^Глад\s+Валакас\s*[:\-\.]?\s*', '', title, flags=re.I).strip()
+    # Удаляем "на VK Видео Live" из конца
     title = re.sub(r'\s+на\s+VK\s+Видео\s+Live\s*$', '', title, flags=re.I).strip()
+    # Чистим множественные пробелы
     title = re.sub(r'\s+', ' ', title).strip()
     return title if title else None
 
@@ -1020,9 +1024,9 @@ def kick_fetch() -> dict:
         playback_url = sc.get("playback_url") or None
     return {"live": is_live, "title": trim(title, MAX_TITLE_LEN), "category": trim(cat, MAX_GAME_LEN), "viewers": viewers, "thumb": thumb, "created_at": created_at, "playback_url": playback_url}
 
-# FIXED: VK Play парсинг на основе реальной структуры HTML
+# FIXED: Правильный парсинг VK Play на основе реальной HTML структуры
 def vk_fetch_best_effort() -> dict:
-    """FIXED: Parse VK Play using initial-state JSON from actual HTML structure."""
+    """FIXED: Parse VK Play using actual HTML structure from gladvalakas page."""
     headers = dict(HEADERS_HTML)
     headers.update({
         "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
@@ -1043,58 +1047,92 @@ def vk_fetch_best_effort() -> dict:
     thumb = None
     live = False
     
-    # Method 1: Parse initial-state JSON (actual structure from VK Play)
-    m = re.search(r'<script[^>]+id=["\']?initial-state["\']?[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+    # Метод 1: Парсинг initial-state JSON
+    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
             data = json.loads(m.group(1))
+            # Проверяем что это нужный канал
+            blog_url = data.get("props", {}).get("pageProps", {}).get("blog", {}).get("blogUrl")
+            if blog_url and blog_url != VK_SLUG:
+                log_line(f"VK: Wrong channel detected: {blog_url} (expected {VK_SLUG})")
+                return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
             
-            # Navigate to stream data in the actual structure
-            stream_data = data.get("stream", {}).get("stream", {}).get("data", {})
+            # Получаем данные стрима
+            stream_data = data.get("props", {}).get("pageProps", {}).get("stream", {})
             if stream_data:
-                # Check if online
+                # Статус онлайн
                 is_online = stream_data.get("isOnline", False)
                 if is_online:
                     live = True
-                    log_line(f"VK: isOnline={is_online}")
                 
-                # Extract title
-                title = stream_data.get("title")
-                if title:
-                    title = _clean_stream_title(title)
+                # Название из titleData
+                title_data = stream_data.get("titleData", [])
+                if title_data and isinstance(title_data, list):
+                    for item in title_data:
+                        content = item.get("content", "")
+                        if content:
+                            try:
+                                content_parsed = json.loads(content)
+                                if isinstance(content_parsed, list) and len(content_parsed) > 0:
+                                    title = content_parsed[0]
+                            except:
+                                title = content
+                            break
                 
-                # Extract category
+                # Категория
                 cat_data = stream_data.get("category", {})
                 if isinstance(cat_data, dict):
                     category = cat_data.get("title")
                 
-                # Extract viewers
+                # Зрители
                 count_data = stream_data.get("count", {})
                 if isinstance(count_data, dict):
                     viewers = count_data.get("viewers")
-                
-                log_line(f"VK stream data: live={live}, title={title}, cat={category}, viewers={viewers}")
+                    
         except Exception as e:
-            log_line(f"VK initial-state parse error: {e}")
+            log_line(f"VK __NEXT_DATA__ parse error: {e}")
     
-    # Method 2: Fallback to meta tags
+    # Метод 2: Парсинг из HTML (фоллбэк)
+    if not title or not category or viewers is None:
+        # Название из data-role="markup"
+        title_match = re.search(r'data-role=["\']?markup["\']?[^>]*>([^<]+)', html)
+        if title_match and not title:
+            title = title_match.group(1).strip()
+        
+        # Категория из ссылки
+        cat_match = re.search(r'href=["\'][/]app/category/[^"\']+["\']>([^<]+)</a>', html)
+        if cat_match and not category:
+            category = cat_match.group(1).strip()
+        
+        # Зрители из ViewersCounter
+        viewers_match = re.search(r'class=["\']ViewersCounter_container[^"\']*["\'][^>]*>\s*<div>\s*(\d+)\s*</div>', html)
+        if viewers_match and viewers is None:
+            viewers = int(viewers_match.group(1))
+            if viewers > 0:
+                live = True
+    
+    # Метод 3: Проверка через og:description
     if not live:
-        # Check og:type for broadcast
-        og_type = re.search(r'property=["\']?og:type["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        if og_type and "broadcast" in og_type.group(1).lower():
-            live = True
+        og_desc = re.search(r'property=["\']?og:description["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if og_desc:
+            desc = og_desc.group(1)
+            if "прямо сейчас" in desc.lower():
+                live = True
+                # Извлекаем зрителей
+                vm = re.search(r'(\d+)\s*зрител', desc, re.I)
+                if vm and viewers is None:
+                    viewers = int(vm.group(1))
     
-    # Get title from og:title if not found
-    if not title:
-        og_title = re.search(r'property=["\']?og:title["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        if og_title:
-            title = _clean_stream_title(og_title.group(1))
+    # Очищаем название
+    if title:
+        title = _clean_stream_title(title)
     
-    # Get thumbnail from og:image
+    # Получаем превью
     if not thumb:
-        og_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        if og_img:
-            thumb = og_img.group(1).strip()
+        m_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if m_img:
+            thumb = m_img.group(1).strip()
     
     log_line(f"VK final: live={live}, title='{title}', cat='{category}', viewers={viewers}")
     
