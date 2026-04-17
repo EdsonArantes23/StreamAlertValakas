@@ -49,7 +49,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
 
 START_DEDUP_SEC = int(os.getenv("START_DEDUP_SEC", "120"))
-CHANGE_DEDUP_SEC = int(os.getenv("CHANGE_DEDUP_SEC", "120"))
+CHANGE_DEDUP_SEC = int(os.getenv("CHANGE_DEDUP_SEC", "20"))
 
 BOOT_STATUS_ENABLED = os.getenv("BOOT_STATUS_ENABLED", "1").strip() not in {"0", "false", "False"}
 BOOT_STATUS_DEDUP_SEC = int(os.getenv("BOOT_STATUS_DEDUP_SEC", "300"))
@@ -103,7 +103,7 @@ ERROR_DEDUP_SEC = 300
 BOT_QUOTA_MB = int(os.getenv("BOT_QUOTA_MB", "500"))
 BOT_WARN_PERCENT = float(os.getenv("BOT_WARN_PERCENT", "90"))
 BOT_NOTIFY_COOLDOWN_SEC = int(os.getenv("BOT_NOTIFY_COOLDOWN_SEC", str(6 * 60 * 60)))
-BOT_TOP_FILES = int(os.getenv("BOT_TOP_files", "5"))
+BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
 RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
 SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))
@@ -212,19 +212,13 @@ STATS_MAX_KEYS = 20
 STATS_MAX_PRINT = 100
 
 def _norm_key(x: str | None) -> str:
-    s = (x or "—")
-    s = str(s).strip()
+    """FIXED: Normalize string for comparison - strip whitespace and normalize spaces"""
+    if not x:
+        return "—"
+    s = str(x).strip()
+    # Normalize multiple spaces to single space
+    s = re.sub(r'\s+', ' ', s)
     return s if s else "—"
-
-def _clean_stream_title(title: str | None) -> str | None:
-    """Очистить название стрима от имени стримера."""
-    if not title:
-        return None
-    title = str(title).strip()
-    title = re.sub(r'^Глад\s+Валакас\s*[:\-\.]?\s*', '', title, flags=re.I).strip()
-    title = re.sub(r'\s+на\s+VK\s+Видео\s+Live\s*$', '', title, flags=re.I).strip()
-    title = re.sub(r'\s+', ' ', title).strip()
-    return title if title else None
 
 def _add_dur(d: dict, key: str, delta: int) -> None:
     key = _norm_key(key)
@@ -378,8 +372,8 @@ def build_end_report(st: dict) -> str:
             out.append(f"🔗 Ссылка: {url}")
             return out
         pstats = (stats.get(key) or {}) if isinstance(stats.get(key), dict) else {}
-        out.append(f"👥 Зрители (min/avg/max): <b>{fmt_viewers(pstats.get('min'))}</b> / {_fmt_avg(pstats)} / <b>{fmt_viewers(pstats.get('max'))}</b>")
-        out.append(f"🔁 Смен названия: <b>{int(pstats.get('title_changes',0) or 0)}</b> • Смен категории: <b>{int(pstats.get('cat_changes',0) or 0)}</b>")
+        out.append(f"👥 Зрители (min/avg/max): {fmt_viewers(pstats.get('min'))} / {_fmt_avg(pstats)} / {fmt_viewers(pstats.get('max'))}")
+        out.append(f"🔁 Смен названия: {int(pstats.get('title_changes',0) or 0)} • Смен категории: {int(pstats.get('cat_changes',0) or 0)}")
         cat_tl = stats.get(f"{key}_cat_timeline") or []
         title_tl = stats.get(f"{key}_title_timeline") or []
         out.append(" ")
@@ -1028,9 +1022,9 @@ def _find_container_with_streaminfo(obj):
                 return found
     return None
 
-# FIXED: Улучшенный парсинг VK Play на основе HTML структуры
+# FIXED: VK Play parsing with proper normalization to prevent false change detection
 def vk_fetch_best_effort() -> dict:
-    """FIXED: Parse VK Play from initial-state JSON in HTML page."""
+    """FIXED: Parse VK Play with normalized data to prevent spam notifications"""
     headers = dict(HEADERS_HTML)
     headers.update({
         "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
@@ -1051,21 +1045,16 @@ def vk_fetch_best_effort() -> dict:
     thumb = None
     live = False
     
-    # Метод 1: Парсинг initial-state JSON (самый надежный)
+    # Method 1: Parse initial-state JSON
     m = re.search(r'<script[^>]+id=["\']?initial-state["\']?[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
             data = json.loads(m.group(1))
             
-            # Ищем стрим в stream.stream.data.stream
-            stream_data = data.get("stream", {}).get("stream", {}).get("data", {}).get("stream", {})
+            # Navigate to stream data
+            stream_data = data.get("stream", {}).get("stream", {}).get("data", {})
             if stream_data:
-                # Статус онлайн
-                is_online = stream_data.get("isOnline", False)
-                if is_online:
-                    live = True
-                
-                # Название из titleData
+                # Extract title from titleData array
                 title_data = stream_data.get("titleData", [])
                 if title_data and isinstance(title_data, list):
                     for item in title_data:
@@ -1074,61 +1063,67 @@ def vk_fetch_best_effort() -> dict:
                             try:
                                 content_parsed = json.loads(content)
                                 if isinstance(content_parsed, list) and len(content_parsed) > 0:
-                                    title = content_parsed[0]
+                                    title = str(content_parsed[0]).strip()
                             except:
-                                title = content
+                                title = str(content).strip()
                             break
                 
-                # Категория
+                # Extract category
                 cat_obj = stream_data.get("category", {})
                 if isinstance(cat_obj, dict):
-                    category = cat_obj.get("title") or category
+                    category = str(cat_obj.get("title", "")).strip()
                 
-                # Зрители из count.sources
+                # Extract viewers count
                 count_obj = stream_data.get("count", {})
                 if isinstance(count_obj, dict):
-                    sources = count_obj.get("sources", [])
-                    if isinstance(sources, list):
-                        for source in sources:
-                            if isinstance(source, dict) and source.get("source") == "live.vkvideo.ru":
-                                viewers = source.get("viewers")
-                                break
-                    if viewers is None:
-                        viewers = count_obj.get("viewers")
+                    viewers = count_obj.get("viewers")
+                    if isinstance(viewers, int) and viewers > 0:
+                        live = True
                 
-                log_line(f"VK initial-state: live={live}, title='{title}', cat='{category}', viewers={viewers}")
-                
+                # Check if online
+                is_online = stream_data.get("isOnline", False)
+                if is_online:
+                    live = True
+                    
         except Exception as e:
             log_line(f"VK initial-state parse error: {e}")
     
-    # Метод 2: Фоллбэк на HTML парсинг
-    if not live or not title:
-        # Название из ChannelStreamTitle
+    # Method 2: Fallback to HTML parsing
+    if not title or not category:
+        # Title from ChannelStreamTitle
         title_match = re.search(r'class=["\']ChannelStreamTitle_root[^"\']*["\']\s+title=["\']([^"\']+)["\']', html)
         if title_match and not title:
-            title = title_match.group(1)
+            title = str(title_match.group(1)).strip()
         
-        # Категория из ссылки
+        # Category from link
         cat_match = re.search(r'href=["\'][/]app/category/[^"\']+["\']>([^<]+)</a>', html)
         if cat_match and not category:
-            category = cat_match.group(1)
+            category = str(cat_match.group(1)).strip()
         
-        # Зрители из ViewersCounter
+        # Viewers from ViewersCounter
         viewers_match = re.search(r'class=["\']ViewersCounter_container[^"\']*["\'][^>]*>\s*<div>\s*(\d+)\s*</div>', html)
         if viewers_match and viewers is None:
             viewers = int(viewers_match.group(1))
             if viewers > 0:
                 live = True
     
-    # Метод 3: Фоллбэк на og:title и og:description
+    # Method 3: Fallback to og:title and og:description
     if not title:
         og_title_match = re.search(r'property=["\']?og:title["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
         if og_title_match:
-            title = og_title_match.group(1)
+            title = str(og_title_match.group(1)).strip()
     
-    # Очищаем название от имени стримера
+    # Normalize all values for consistent comparison
     if title:
-        title = _clean_stream_title(title)
+        title = _norm_key(title)
+    if category:
+        category = _norm_key(category)
+    
+    # Get thumbnail from og:image
+    if not thumb:
+        m_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if m_img:
+            thumb = m_img.group(1).strip()
     
     log_line(f"VK final: live={live}, title='{title}', cat='{category}', viewers={viewers}")
     
@@ -1663,6 +1658,8 @@ def main_loop():
             prev_any = bool(st.get("any_live"))
             prev_end_streak = int(st.get("end_streak") or 0)
         any_live = bool(kick.get("live") or vk.get("live"))
+        
+        # START - Only send if stream actually starts
         if (not prev_any) and any_live:
             with STATE_LOCK:
                 st = load_state()
@@ -1683,6 +1680,8 @@ def main_loop():
                         save_state(st)
                 except Exception as e:
                     log_line(f"Start send error: {e}")
+        
+        # CHANGE - Only send if title or category actually changed
         kick_title_changed = False
         kick_cat_changed = False
         vk_title_changed = False
@@ -1690,12 +1689,14 @@ def main_loop():
         with STATE_LOCK:
             st = load_state()
             if kick.get("live"):
-                kick_title_changed = (kick.get("title") != st.get("kick_title"))
-                kick_cat_changed = (kick.get("category") != st.get("kick_cat"))
+                kick_title_changed = (_norm_key(kick.get("title")) != _norm_key(st.get("kick_title")))
+                kick_cat_changed = (_norm_key(kick.get("category")) != _norm_key(st.get("kick_cat")))
             if vk.get("live"):
-                vk_title_changed = (vk.get("title") != st.get("vk_title"))
-                vk_cat_changed = (vk.get("category") != st.get("vk_cat"))
+                vk_title_changed = (_norm_key(vk.get("title")) != _norm_key(st.get("vk_title")))
+                vk_cat_changed = (_norm_key(vk.get("category")) != _norm_key(st.get("vk_cat")))
+        
         changed = (kick_title_changed or kick_cat_changed or vk_title_changed or vk_cat_changed)
+        
         if any_live and prev_any and changed:
             with STATE_LOCK:
                 st = load_state()
@@ -1710,8 +1711,11 @@ def main_loop():
                         st = load_state()
                         st["last_change_sent_ts"] = ts()
                         save_state(st)
+                    log_line(f"Change notification sent: title_changed={kick_title_changed or vk_title_changed}, cat_changed={kick_cat_changed or vk_cat_changed}")
                 except Exception as e:
                     log_line(f"Change send error: {e}")
+        
+        # END
         should_send_end = False
         with STATE_LOCK:
             st_chk = load_state()
@@ -1738,6 +1742,8 @@ def main_loop():
                     save_state(st_end2)
             except Exception as e:
                 log_line(f"End send error: {e}")
+        
+        # SAVE NEW STATE
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = any_live
