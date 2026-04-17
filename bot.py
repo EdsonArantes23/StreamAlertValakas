@@ -1071,7 +1071,7 @@ def vk_fetch_best_effort() -> dict:
         try:
             data = json.loads(m.group(1))
             blog_data = data.get("blog", {}).get("blog", {}).get("data")
-            if blog_
+            if blog_url:
                 blog_url = blog_data.get("blogUrl")
                 if blog_url != VK_SLUG:
                     log_line(f"VK Play: Wrong channel detected: {blog_url} (expected {VK_SLUG})")
