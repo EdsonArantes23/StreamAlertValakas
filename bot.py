@@ -696,13 +696,21 @@ def load_state() -> dict:
     try:
         if os.path.getsize(STATE_FILE) > MAX_STATE_SIZE:
             notify_admin_dedup("state_file_large", f"⚠️ state.json слишком большой: {os.path.getsize(STATE_FILE)} bytes")
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            raw = f.read()
-        if not raw.strip():
-            return default_state()
-        st = json.loads(raw)
-        important = {"any_live", "kick_live", "vk_live", "started_at", "updates_offset", "last_command_seen_ts", "last_updates_poll_ts", "end_streak", "end_sent_for_started_at", "stream_stats"}
-        st = {k: v for k, v in (st or {}).items() if k in important}
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                raw = f.read()
+            if not raw.strip():
+                return default_state()
+            st = json.loads(raw)
+            important = {"any_live", "kick_live", "vk_live", "started_at", "updates_offset", "last_command_seen_ts", "last_updates_poll_ts", "end_streak", "end_sent_for_started_at", "stream_stats"}
+            st = {k: v for k, v in (st or {}).items() if k in important}
+        else:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                raw = f.read()
+            if not raw.strip():
+                return default_state()
+            st = json.loads(raw)
+            if not isinstance(st, dict):
+                return default_state()
     except Exception:
         return default_state()
     base = default_state()
@@ -1012,27 +1020,14 @@ def kick_fetch() -> dict:
         playback_url = sc.get("playback_url") or None
     return {"live": is_live, "title": trim(title, MAX_TITLE_LEN), "category": trim(cat, MAX_GAME_LEN), "viewers": viewers, "thumb": thumb, "created_at": created_at, "playback_url": playback_url}
 
-def _find_container_with_streaminfo(obj):
-    if isinstance(obj, dict):
-        if "streamInfo" in obj and isinstance(obj.get("streamInfo"), dict):
-            return obj
-        for v in obj.values():
-            found = _find_container_with_streaminfo(v)
-            if found:
-                return found
-    elif isinstance(obj, list):
-        for v in obj:
-            found = _find_container_with_streaminfo(v)
-            if found:
-                return found
-    return None
-
-# FIXED: VK Play detection based on actual HTML structure
+# FIXED: VK Play парсинг на основе реальной структуры HTML
 def vk_fetch_best_effort() -> dict:
-    """Parse VK Play page for stream status - based on actual HTML structure."""
+    """FIXED: Parse VK Play using initial-state JSON from actual HTML structure."""
     headers = dict(HEADERS_HTML)
     headers.update({
         "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
     })
     
     try:
@@ -1048,46 +1043,39 @@ def vk_fetch_best_effort() -> dict:
     thumb = None
     live = False
     
-    # Method 1: Parse initial-state JSON (most reliable)
-    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+    # Method 1: Parse initial-state JSON (actual structure from VK Play)
+    m = re.search(r'<script[^>]+id=["\']?initial-state["\']?[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
             data = json.loads(m.group(1))
-            # Navigate to stream data
-            stream_data = data.get("props", {}).get("pageProps", {}).get("stream", {})
-            if stream_
+            
+            # Navigate to stream data in the actual structure
+            stream_data = data.get("stream", {}).get("stream", {}).get("data", {})
+            if stream_data:
                 # Check if online
                 is_online = stream_data.get("isOnline", False)
                 if is_online:
                     live = True
+                    log_line(f"VK: isOnline={is_online}")
                 
-                # Get title
-                title_data = stream_data.get("titleData", [])
-                if title_data and isinstance(title_data, list):
-                    for item in title_data:
-                        content = item.get("content", "")
-                        if content:
-                            try:
-                                content_parsed = json.loads(content)
-                                if isinstance(content_parsed, list) and len(content_parsed) > 0:
-                                    title = content_parsed[0]
-                            except:
-                                title = content
-                            break
+                # Extract title
+                title = stream_data.get("title")
+                if title:
+                    title = _clean_stream_title(title)
                 
-                # Get category
+                # Extract category
                 cat_data = stream_data.get("category", {})
                 if isinstance(cat_data, dict):
                     category = cat_data.get("title")
                 
-                # Get viewers
+                # Extract viewers
                 count_data = stream_data.get("count", {})
                 if isinstance(count_data, dict):
                     viewers = count_data.get("viewers")
-                    if isinstance(viewers, int) and viewers > 0:
-                        live = True
+                
+                log_line(f"VK stream data: live={live}, title={title}, cat={category}, viewers={viewers}")
         except Exception as e:
-            log_line(f"VK __NEXT_DATA__ parse error: {e}")
+            log_line(f"VK initial-state parse error: {e}")
     
     # Method 2: Fallback to meta tags
     if not live:
@@ -1100,17 +1088,13 @@ def vk_fetch_best_effort() -> dict:
     if not title:
         og_title = re.search(r'property=["\']?og:title["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
         if og_title:
-            title = og_title.group(1)
+            title = _clean_stream_title(og_title.group(1))
     
     # Get thumbnail from og:image
     if not thumb:
         og_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
         if og_img:
-            thumb = og_img.group(1)
-    
-    # Clean title
-    if title:
-        title = _clean_stream_title(title)
+            thumb = og_img.group(1).strip()
     
     log_line(f"VK final: live={live}, title='{title}', cat='{category}', viewers={viewers}")
     
@@ -1341,11 +1325,11 @@ def build_admin_diag_text(st: dict, webhook_info: dict) -> str:
     on_air_icon = "✅" if on_air else "⚠️"
     on_air_text = "Да" if on_air else "Похоже, нет (давно не опрашивал Telegram)"
     offset = int(st.get("updates_offset") or 0)
-    url = "—"
-    pend = "—"
+    url = " "
+    pend = " "
     try:
-        url = webhook_info.get("url", "—")
-        pend = str(webhook_info.get("pending_update_count", "—"))
+        url = webhook_info.get("url", " ")
+        pend = str(webhook_info.get("pending_update_count", " "))
     except Exception:
         url = str(webhook_info)
         pend = "—"
@@ -1645,7 +1629,6 @@ def main_loop():
             prev_any = bool(st.get("any_live"))
             prev_end_streak = int(st.get("end_streak") or 0)
         any_live = bool(kick.get("live") or vk.get("live"))
-        # START
         if (not prev_any) and any_live:
             with STATE_LOCK:
                 st = load_state()
@@ -1666,7 +1649,6 @@ def main_loop():
                         save_state(st)
                 except Exception as e:
                     log_line(f"Start send error: {e}")
-        # CHANGE
         kick_title_changed = False
         kick_cat_changed = False
         vk_title_changed = False
@@ -1696,7 +1678,6 @@ def main_loop():
                         save_state(st)
                 except Exception as e:
                     log_line(f"Change send error: {e}")
-        # END
         should_send_end = False
         with STATE_LOCK:
             st_chk = load_state()
@@ -1723,13 +1704,13 @@ def main_loop():
                     save_state(st_end2)
             except Exception as e:
                 log_line(f"End send error: {e}")
-        # SAVE NEW STATE
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = any_live
             st["kick_live"] = bool(kick.get("live"))
             st["vk_live"] = bool(vk.get("live"))
             if any_live:
+                set_started_at_from_kick(st, kick)
                 st["end_streak"] = 0
             else:
                 st["end_streak"] = prev_end_streak + 1
