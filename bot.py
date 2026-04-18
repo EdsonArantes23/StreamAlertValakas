@@ -49,7 +49,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
 
 START_DEDUP_SEC = int(os.getenv("START_DEDUP_SEC", "120"))
-CHANGE_DEDUP_SEC = int(os.getenv("CHANGE_DEDUP_SEC", "120"))
+CHANGE_DEDUP_SEC = int(os.getenv("CHANGE_DEDUP_SEC", "120"))  # 2 минуты между уведомлениями
 
 BOOT_STATUS_ENABLED = os.getenv("BOOT_STATUS_ENABLED", "1").strip() not in {"0", "false", "False"}
 BOOT_STATUS_DEDUP_SEC = int(os.getenv("BOOT_STATUS_DEDUP_SEC", "300"))
@@ -91,7 +91,7 @@ FFMPEG_SCALE = os.getenv("FFMPEG_SCALE", "1280:-1").strip()
 MAX_TITLE_LEN = int(os.getenv("MAX_TITLE_LEN", "180"))
 MAX_GAME_LEN = int(os.getenv("MAX_GAME_LEN", "120"))
 
-END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "30"))
+END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "30"))  # 15 минут оффлайна перед отчетом
 
 NOTIFY_409_EVERY_SEC = 6 * 60 * 60
 
@@ -213,7 +213,7 @@ STATS_MAX_PRINT = 100
 
 def _norm_key(x: str | None) -> str:
     s = (x or "—")
-    s = str(s).strip()
+    s = str(s).strip().lower()
     return s if s else "—"
 
 def _clean_stream_title(title: str | None) -> str | None:
@@ -833,8 +833,8 @@ def get_platform_keyboard() -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "🎥 Kick", "url": KICK_PUBLIC_URL, "style": "success"},
-                {"text": "🎮 VK Play", "url": VK_PUBLIC_URL, "style": "primary"}
+                {"text": "🎥 Kick", "url": KICK_PUBLIC_URL},
+                {"text": "🎮 VK Play", "url": VK_PUBLIC_URL}
             ]
         ]
     }
@@ -1114,6 +1114,7 @@ def build_caption(prefix: str, st: dict, kick: dict, vk: dict) -> str:
         lines.append(f"🕒 Старт (МСК): {fmt_msk(dt_from_iso(st.get('started_at')))}")
     lines.append(f"⏱ {esc(running)}")
     lines.append(" ")
+    # Всегда показываем Kick
     lines.append("🎥 Kick")
     if kick.get("live"):
         if kick.get("category"):
@@ -1124,6 +1125,7 @@ def build_caption(prefix: str, st: dict, kick: dict, vk: dict) -> str:
     else:
         lines.append("⚫ OFF")
     lines.append(" ")
+    # Всегда показываем VK Play
     lines.append("🎮 VK Play")
     if vk.get("live"):
         if vk.get("category"):
@@ -1195,22 +1197,28 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
         lines.append(f"🕒 Старт (МСК): {fmt_msk(start_dt)}")
     lines.append(f"🕒 Сейчас (МСК): {now_msk_str()} • ⏱ {esc(fmt_running_line(st))}")
     lines.append(" ")
+    # Всегда показываем Kick (даже если оффлайн)
+    lines.append("🎥 Kick")
     if kick.get("live"):
-        lines.append("🎥 Kick")
         if kick.get("category"):
             lines.append(f"🏷 Категория: <b>{esc(kick.get('category'))}</b>")
         if kick.get("title"):
             lines.append(f"📝 Название: <i>{esc(kick.get('title'))}</i>")
         lines.append(f"👥 Зрители: <b>{fmt_viewers(kick.get('viewers'))}</b>")
-        lines.append(" ")
+    else:
+        lines.append("⚫ OFF")
+    lines.append(" ")
+    # Всегда показываем VK Play (даже если оффлайн) ← ИСПРАВЛЕНО
+    lines.append("🎮 VK Play")
     if vk.get("live"):
-        lines.append("🎮 VK Play")
         if vk.get("category"):
             lines.append(f"🏷 Категория: <b>{esc(vk.get('category'))}</b>")
         if vk.get("title"):
             lines.append(f"📝 Название: <i>{esc(vk.get('title'))}</i>")
         lines.append(f"👥 Зрители: <b>{fmt_viewers(vk.get('viewers'))}</b>")
-        lines.append(" ")
+    else:
+        lines.append("⚫ OFF")
+    lines.append(" ")
     lines.append(f"🔗 {KICK_PUBLIC_URL}")
     lines.append(f"🔗 {VK_PUBLIC_URL}")
     return "\n".join(lines)
@@ -1667,7 +1675,7 @@ def main_loop():
                         st = load_state()
                         st["last_change_sent_ts"] = ts()
                         save_state(st)
-                    log_line(f"Change notification sent (title/cat only)")
+                    log_line(f"Change notification sent")
                 except Exception as e:
                     log_line(f"Change send error: {e}")
         
