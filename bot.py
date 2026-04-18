@@ -91,7 +91,7 @@ FFMPEG_SCALE = os.getenv("FFMPEG_SCALE", "1280:-1").strip()
 MAX_TITLE_LEN = int(os.getenv("MAX_TITLE_LEN", "180"))
 MAX_GAME_LEN = int(os.getenv("MAX_GAME_LEN", "120"))
 
-END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "40"))
+END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "30"))
 
 NOTIFY_409_EVERY_SEC = 6 * 60 * 60
 
@@ -688,7 +688,7 @@ def notify_admin_dedup(key: str, text: str) -> None:
     notify_admin(text)
 
 def default_state() -> dict:
-    return {"any_live": False, "kick_live": False, "vk_live": False, "started_at": None, "startup_ping_sent": False, "kick_title": None, "kick_cat": None, "vk_title": None, "vk_cat": None, "kick_viewers": None, "vk_viewers": None, "last_start_sent_ts": 0, "last_change_sent_ts": 0, "last_boot_status_ts": 0, "last_no_stream_start_ts": 0, "updates_offset": 0, "last_command_seen_ts": 0, "last_commands_recover_ts": 0, "last_updates_poll_ts": 0, "end_streak": 0, "end_sent_for_started_at": None, "end_sent_ts": 0, "last_409_notify_ts": 0, "admin_private_chat_id": 0, "last_disk_check_ts": 0, "last_temp_cleanup_ts": 0, "last_quota_notify_ts": 0, "stream_stats": None, "vk_m3u8_url": None, "vk_preview_url": None}
+    return {"any_live": False, "kick_live": False, "vk_live": False, "started_at": None, "startup_ping_sent": False, "kick_title": None, "kick_cat": None, "vk_title": None, "vk_cat": None, "kick_viewers": None, "vk_viewers": None, "last_start_sent_ts": 0, "last_change_sent_ts": 0, "last_boot_status_ts": 0, "last_no_stream_start_ts": 0, "updates_offset": 0, "last_command_seen_ts": 0, "last_commands_recover_ts": 0, "last_updates_poll_ts": 0, "end_streak": 0, "end_sent_for_started_at": None, "end_sent_ts": 0, "last_409_notify_ts": 0, "admin_private_chat_id": 0, "last_disk_check_ts": 0, "last_temp_cleanup_ts": 0, "last_quota_notify_ts": 0, "stream_stats": None}
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
@@ -701,7 +701,7 @@ def load_state() -> dict:
         if not raw.strip():
             return default_state()
         st = json.loads(raw)
-        important = {"any_live", "kick_live", "vk_live", "started_at", "updates_offset", "last_command_seen_ts", "last_updates_poll_ts", "end_streak", "end_sent_for_started_at", "stream_stats", "vk_m3u8_url", "vk_preview_url"}
+        important = {"any_live", "kick_live", "vk_live", "started_at", "updates_offset", "last_command_seen_ts", "last_updates_poll_ts", "end_streak", "end_sent_for_started_at", "stream_stats"}
         st = {k: v for k, v in (st or {}).items() if k in important}
     except Exception:
         return default_state()
@@ -1027,9 +1027,7 @@ def _find_container_with_streaminfo(obj):
                 return found
     return None
 
-# FIXED: Complete working function without syntax errors
 def vk_fetch_best_effort() -> dict:
-    """Parse VK Play page for stream data - NO SYNTAX ERRORS."""
     headers = dict(HEADERS_HTML)
     headers.update({
         "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
@@ -1042,17 +1040,14 @@ def vk_fetch_best_effort() -> dict:
         html = r.text
     except Exception as e:
         log_line(f"VK fetch HTTP error: {e}")
-        return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "m3u8_url": None, "preview_url": None}
+        return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
     
     title = None
     category = None
     viewers = None
     thumb = None
-    m3u8_url = None
-    preview_url = None
     live = False
     
-    # Parse initial-state JSON
     m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
@@ -1062,7 +1057,6 @@ def vk_fetch_best_effort() -> dict:
                 ch = container.get("channelInfo") or {}
                 si = container.get("streamInfo") or {}
                 
-                # Check if live
                 status = str(ch.get("status") or " ").upper()
                 is_live_flag = si.get("isLive") or si.get("is_live") or ch.get("isLive")
                 
@@ -1072,59 +1066,32 @@ def vk_fetch_best_effort() -> dict:
                     is_live_flag == "true"
                 )
                 
-                # Get title
                 title = si.get("title") or ch.get("title") or title
-                
-                # Get category
                 catobj = si.get("category") or ch.get("category") or {}
                 if isinstance(catobj, dict):
                     category = catobj.get("title") or catobj.get("name") or category
                 
-                # Get viewers
                 cnt = si.get("counters") or si.get("stats") or {}
                 if isinstance(cnt, dict):
                     viewers = cnt.get("viewers") or cnt.get("online") or cnt.get("viewersCount")
                 
                 if isinstance(viewers, int) and viewers > 0:
                     live = True
-                    
         except Exception as e:
             log_line(f"VK __NEXT_DATA__ parse error: {e}")
     
-    # Fallback to HTML parsing
-    if not title or not category or viewers is None:
-        # Title from ChannelStreamTitle
-        title_match = re.search(r'class="ChannelStreamTitle_root[^"]*"\s+title="([^"]+)"', html)
-        if title_match and not title:
-            title = title_match.group(1)
-        
-        # Category from link
-        cat_match = re.search(r'href="[/]app/category/[^"]+">([^<]+)</a>', html)
-        if cat_match and not category:
-            category = cat_match.group(1)
-        
-        # Viewers from ViewersCounter
-        viewers_match = re.search(r'class="ViewersCounter_container[^"]*"[^>]*>\s*<div>\s*(\d+)\s*</div>', html)
-        if viewers_match and viewers is None:
-            viewers = int(viewers_match.group(1))
-            if viewers > 0:
-                live = True
-    
-    # Fallback to og:title
     if not title:
         og_title_match = re.search(r'property=["\']?og:title["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
         if og_title_match:
             title = og_title_match.group(1)
     
-    # Clean title
-    if title:
-        title = _clean_stream_title(title)
-    
-    # Get thumbnail from og:image
     if not thumb:
         m_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
         if m_img:
             thumb = m_img.group(1).strip()
+    
+    if title:
+        title = _clean_stream_title(title)
     
     log_line(f"VK final: live={live}, title='{title}', cat='{category}', viewers={viewers}")
     
@@ -1133,9 +1100,7 @@ def vk_fetch_best_effort() -> dict:
         "title": trim(title, MAX_TITLE_LEN) if title else None,
         "category": trim(category, MAX_GAME_LEN) if category else None,
         "viewers": viewers,
-        "thumb": thumb,
-        "m3u8_url": m3u8_url,
-        "preview_url": preview_url
+        "thumb": thumb
     }
 
 def build_caption(prefix: str, st: dict, kick: dict, vk: dict) -> str:
@@ -1233,29 +1198,17 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
     if kick.get("live"):
         lines.append("🎥 Kick")
         if kick.get("category"):
-            if kick_cat_changed:
-                lines.append(f"🏷 <b>Категория:</b> <b>{esc(kick.get('category'))}</b>")
-            else:
-                lines.append(f"🏷 Категория: <b>{esc(kick.get('category'))}</b>")
+            lines.append(f"🏷 Категория: <b>{esc(kick.get('category'))}</b>")
         if kick.get("title"):
-            if kick_title_changed:
-                lines.append(f"📝 <b>Название:</b> <i>{esc(kick.get('title'))}</i>")
-            else:
-                lines.append(f"📝 Название: <i>{esc(kick.get('title'))}</i>")
+            lines.append(f"📝 Название: <i>{esc(kick.get('title'))}</i>")
         lines.append(f"👥 Зрители: <b>{fmt_viewers(kick.get('viewers'))}</b>")
         lines.append(" ")
     if vk.get("live"):
         lines.append("🎮 VK Play")
         if vk.get("category"):
-            if vk_cat_changed:
-                lines.append(f"🏷 <b>Категория:</b> <b>{esc(vk.get('category'))}</b>")
-            else:
-                lines.append(f"🏷 Категория: <b>{esc(vk.get('category'))}</b>")
+            lines.append(f"🏷 Категория: <b>{esc(vk.get('category'))}</b>")
         if vk.get("title"):
-            if vk_title_changed:
-                lines.append(f"📝 <b>Название:</b> <i>{esc(vk.get('title'))}</i>")
-            else:
-                lines.append(f"📝 Название: <i>{esc(vk.get('title'))}</i>")
+            lines.append(f"📝 Название: <i>{esc(vk.get('title'))}</i>")
         lines.append(f"👥 Зрители: <b>{fmt_viewers(vk.get('viewers'))}</b>")
         lines.append(" ")
     lines.append(f"🔗 {KICK_PUBLIC_URL}")
@@ -1357,11 +1310,11 @@ def build_admin_diag_text(st: dict, webhook_info: dict) -> str:
     on_air_icon = "✅" if on_air else "⚠️"
     on_air_text = "Да" if on_air else "Похоже, нет (давно не опрашивал Telegram)"
     offset = int(st.get("updates_offset") or 0)
-    url = " "
-    pend = " "
+    url = "—"
+    pend = "—"
     try:
-        url = webhook_info.get("url", " ")
-        pend = str(webhook_info.get("pending_update_count", " "))
+        url = webhook_info.get("url", "—")
+        pend = str(webhook_info.get("pending_update_count", "—"))
     except Exception:
         url = str(webhook_info)
         pend = "—"
@@ -1431,7 +1384,7 @@ def commands_loop_once():
         if isinstance(uid, int):
             max_update_id = uid if (max_update_id is None or uid > max_update_id) else max_update_id
         msg = upd.get("message") or {}
-        text = msg.get("text") or " "
+        text = msg.get("text") or ""
         if not text:
             continue
         try:
@@ -1496,12 +1449,12 @@ def commands_loop_once():
                 try:
                     kick = kick_fetch()
                 except Exception as e:
-                    kick = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None, "m3u8_url": None, "preview_url": None}
+                    kick = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
                     log_line(f"Kick fetch (command) error: {e}")
                 try:
                     vk = vk_fetch_best_effort()
                 except Exception as e:
-                    vk = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "m3u8_url": None, "preview_url": None}
+                    vk = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
                     log_line(f"VK fetch (command) error: {e}")
                 with STATE_LOCK:
                     st_cur = load_state()
@@ -1578,12 +1531,12 @@ def main_loop():
     try:
         kick0 = kick_fetch()
     except Exception as e:
-        kick0 = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None, "m3u8_url": None, "preview_url": None}
+        kick0 = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
         log_line(f"Kick init fetch error: {e}")
     try:
         vk0 = vk_fetch_best_effort()
     except Exception as e:
-        vk0 = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "m3u8_url": None, "preview_url": None}
+        vk0 = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
         log_line(f"VK init fetch error: {e}")
     any_live0 = bool(kick0.get("live") or vk0.get("live"))
     with STATE_LOCK:
@@ -1649,18 +1602,20 @@ def main_loop():
         try:
             kick = kick_fetch()
         except Exception as e:
-            kick = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None, "m3u8_url": None, "preview_url": None}
+            kick = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
             log_line(f"Kick fetch error: {e}")
         try:
             vk = vk_fetch_best_effort()
         except Exception as e:
-            vk = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "m3u8_url": None, "preview_url": None}
+            vk = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
             log_line(f"VK fetch error: {e}")
         with STATE_LOCK:
             st = load_state()
             prev_any = bool(st.get("any_live"))
             prev_end_streak = int(st.get("end_streak") or 0)
         any_live = bool(kick.get("live") or vk.get("live"))
+        
+        # START
         if (not prev_any) and any_live:
             with STATE_LOCK:
                 st = load_state()
@@ -1681,6 +1636,8 @@ def main_loop():
                         save_state(st)
                 except Exception as e:
                     log_line(f"Start send error: {e}")
+        
+        # CHANGE - ТОЛЬКО название и категория, НЕ зрители!
         kick_title_changed = False
         kick_cat_changed = False
         vk_title_changed = False
@@ -1688,12 +1645,14 @@ def main_loop():
         with STATE_LOCK:
             st = load_state()
             if kick.get("live"):
-                kick_title_changed = (kick.get("title") != st.get("kick_title"))
-                kick_cat_changed = (kick.get("category") != st.get("kick_cat"))
+                kick_title_changed = (_norm_key(kick.get("title")) != _norm_key(st.get("kick_title")))
+                kick_cat_changed = (_norm_key(kick.get("category")) != _norm_key(st.get("kick_cat")))
             if vk.get("live"):
-                vk_title_changed = (vk.get("title") != st.get("vk_title"))
-                vk_cat_changed = (vk.get("category") != st.get("vk_cat"))
+                vk_title_changed = (_norm_key(vk.get("title")) != _norm_key(st.get("vk_title")))
+                vk_cat_changed = (_norm_key(vk.get("category")) != _norm_key(st.get("vk_cat")))
+        
         changed = (kick_title_changed or kick_cat_changed or vk_title_changed or vk_cat_changed)
+        
         if any_live and prev_any and changed:
             with STATE_LOCK:
                 st = load_state()
@@ -1708,8 +1667,11 @@ def main_loop():
                         st = load_state()
                         st["last_change_sent_ts"] = ts()
                         save_state(st)
+                    log_line(f"Change notification sent (title/cat only)")
                 except Exception as e:
                     log_line(f"Change send error: {e}")
+        
+        # END
         should_send_end = False
         with STATE_LOCK:
             st_chk = load_state()
@@ -1736,6 +1698,8 @@ def main_loop():
                     save_state(st_end2)
             except Exception as e:
                 log_line(f"End send error: {e}")
+        
+        # SAVE NEW STATE
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = any_live
@@ -1769,11 +1733,11 @@ def main_loop():
             cooldown_ok = (ts() - last_nt) >= BOT_NOTIFY_COOLDOWN_SEC
             if q_percent >= BOT_WARN_PERCENT and cooldown_ok:
                 top = list_largest_files(os.getcwd(), BOT_TOP_FILES)
-                top_text = " "
+                top_text = ""
                 if top:
                     top_lines = "\n".join([f"- {fmt_bytes(sz)} — {path}" for sz, path in top])
                     top_text = "\n\nТоп файлов по размеру:\n" + top_lines
-                notify_admin_dedup("quota_high", "⚠️ Квота диска почти заполнена (по размеру папки бота).\n" + f"Занято ботом: {fmt_bytes(q_used)} из {fmt_bytes(q_total)} ({q_percent:.1f}%)." + top_text + "\n\nОчищаю temp/__pycache__…")
+                notify_admin_dedup("quota_high", f"⚠️ Квота диска почти заполнена (по размеру папки бота).\nЗанято ботом: {fmt_bytes(q_used)} из {fmt_bytes(q_total)} ({q_percent:.1f}%).{top_text}\n\nОчищаю temp/__pycache__…")
                 cleanup_pycache()
                 cleanup_temp_files()
                 cleanup_old_state_backups()
