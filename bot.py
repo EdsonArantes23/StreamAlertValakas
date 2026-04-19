@@ -40,7 +40,6 @@ START_DEDUP_SEC = int(os.getenv("START_DEDUP_SEC", "120"))
 CHANGE_DEDUP_SEC = int(os.getenv("CHANGE_DEDUP_SEC", "20"))
 BOOT_STATUS_ENABLED = os.getenv("BOOT_STATUS_ENABLED", "1").strip() not in {"0", "false", "False"}
 BOOT_STATUS_DEDUP_SEC = int(os.getenv("BOOT_STATUS_DEDUP_SEC", "300"))
-# ИСПРАВЛЕНО: убраны пробелы в названиях переменных окружения
 COMMANDS_ENABLED = os.getenv("COMMANDS_ENABLED", "1").strip() not in {"0", "false", "False"}
 COMMAND_POLL_TIMEOUT = int(os.getenv("COMMAND_POLL_TIMEOUT", "5"))
 COMMAND_HTTP_TIMEOUT = int(os.getenv("COMMAND_HTTP_TIMEOUT", "20"))
@@ -175,7 +174,6 @@ def _norm_key(x: str | None) -> str:
 def _clean_stream_title(title: str | None) -> str | None:
     if not title: return None
     title = str(title).strip()
-    # ИСПРАВЛЕНО: диапазон символов [-:.] вместо [:-.]
     title = re.sub(r'^Глад\s+Валакас\s*[-:.]?\s*', '', title, flags=re.I).strip()
     title = re.sub(r'\s+на\s+VK\s+Видео\s+Live\s*$', '', title, flags=re.I).strip()
     title = re.sub(r'\s+', ' ', title).strip()
@@ -506,7 +504,6 @@ def load_state() -> dict:
         with open(STATE_FILE, "r", encoding="utf-8") as f: raw = f.read()
         if not raw.strip(): return default_state()
         st = json.loads(raw)
-        # ИСПРАВЛЕНО: убраны пробелы в ключах
         important = {"any_live", "kick_live", "vk_live", "started_at", "updates_offset", "last_command_seen_ts", "last_updates_poll_ts", "end_streak", "end_sent_for_started_at", "stream_stats"}
         st = {k: v for k, v in (st or {}).items() if k in important}
     except Exception: return default_state()
@@ -587,7 +584,6 @@ def setup_commands_visibility() -> None:
         if admin_chat != 0: tg_set_my_commands(public_cmds + admin_cmds, scope={"type": "chat", "chat_id": admin_chat})
 
 def tg_get_updates(offset: int, timeout: int) -> list:
-    # ИСПРАВЛЕНО: убраны пробелы в строках
     r = http_request_tg("POST", tg_api_url("getUpdates"), json_body={"offset": int(offset), "timeout": int(timeout), "allowed_updates": ["message"]}, timeout=(5, max(int(COMMAND_HTTP_TIMEOUT), int(timeout) + 15)))
     data = r.json()
     if not data.get("ok"): raise RuntimeError(f"Telegram getUpdates error: {data}")
@@ -711,6 +707,7 @@ def kick_fetch() -> dict:
     sc = data.get("streamer_channel") or {}; playback_url = sc.get("playback_url") if isinstance(sc, dict) else None
     return {"live": is_live, "title": trim(title, MAX_TITLE_LEN), "category": trim(cat, MAX_GAME_LEN), "viewers": viewers, "thumb": thumb, "created_at": created_at, "playback_url": playback_url}
 
+# ========== ИСПРАВЛЕННАЯ ЧАСТЬ ПО ВК ВИДЕО ==========
 def vk_fetch_best_effort() -> dict:
     headers = dict(HEADERS_HTML)
     headers.update({"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8", "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate"})
@@ -718,68 +715,80 @@ def vk_fetch_best_effort() -> dict:
     try:
         r = http_request_ext("GET", VK_PUBLIC_URL, headers=headers, timeout=25, allow_redirects=True); html = r.text
     except Exception as e:
-        log_line(f"VK fetch HTTP error: {e}"); return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
-    # ИСПРАВЛЕНО: убраны пробелы в проверке URL
+        log_line(f"VK fetch HTTP error: {e}")
+        return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
+    
     if f'"blogUrl":"{VK_SLUG}"' not in html and f"'blogUrl':'{VK_SLUG}'" not in html:
         if VK_SLUG.lower() not in html.lower() and "глад валакас" not in html.lower():
             return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
+            
     title, category, viewers, thumb, live, playback_url = None, None, None, None, False, None
-    # ИСПРАВЛЕНО: regex без пробелов
+    
+    # 1. JSON initial-state
     m = re.search(r'<script[^>]+id=["\']?initial-state["\']?[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
             data = json.loads(m.group(1))
             blog_data = data.get("blog", {}).get("blog", {}).get("data")
-            if blog_data and blog_data.get("blogUrl") != VK_SLUG: log_line(f"VK Play: Wrong channel in JSON: {blog_data.get('blogUrl')}")
+            if blog_data and blog_data.get("blogUrl") != VK_SLUG: pass
             else:
                 stream_data = data.get("stream", {}).get("stream", {}).get("data")
-                if stream_data:
-                    if stream_data.get("isOnline", False):
-                        live = True; title = stream_data.get("title")
-                        cat_data = stream_data.get("category", {}); category = cat_data.get("title") if isinstance(cat_data, dict) else None
-                        count_data = stream_data.get("count", {}); viewers = count_data.get("viewers") if isinstance(count_data, dict) else None
-                        playback_url = stream_data.get("playbackUrl") or stream_data.get("hlsUrl")
+                if stream_data and stream_data.get("isOnline", False):
+                    live = True; title = stream_data.get("title")
+                    cat_data = stream_data.get("category", {})
+                    if isinstance(cat_data, dict): category = cat_data.get("title")
+                    count_data = stream_data.get("count", {})
+                    if isinstance(count_data, dict): viewers = count_data.get("viewers")
+                    playback_url = stream_data.get("playbackUrl") or stream_data.get("hlsUrl")
         except Exception as e: log_line(f"VK initial-state parse error: {e}")
+        
+    # 2. HTML Fallback (по вашим классам)
     if not live or not title or not category or viewers is None:
         if '"isOnline":true' in html or "'isOnline':true" in html or 'data-live="true"' in html.lower(): live = True
-        # ИСПРАВЛЕНО: regex без пробелов
-        viewer_match = re.search(r'class="[^"]*ViewersCounter[^"]*"[^>]*>\s*<div[^>]*>(\d+)</div>', html)
+        # Зрители
+        viewer_match = re.search(r'ViewersCounter[^>]*>\s*<div[^>]*>(\d+)</div>', html)
         if viewer_match:
             live = True
             try: viewers = int(viewer_match.group(1))
             except ValueError: pass
-        title_match = re.search(r'class="[^"]*StreamTitle_root[^"]*[^>]*>\s*<div[^>]*data-role="markup"[^>]*>([^<]+)</div>', html)
+        # Название
+        title_match = re.search(r'StreamTitle_root[^>]*data-role="markup"[^>]*>([^<]+)</div>', html)
         if title_match: title = title_match.group(1).strip()
         else:
             og_title = re.search(r'property=["\']?og:title["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             if og_title:
                 t = og_title.group(1).strip()
                 if VK_SLUG.lower() in t.lower() or "глад валакас" in t.lower(): title = _clean_stream_title(t)
-        cat_match = re.search(r'class="[^"]*StreamCategory_root[^"]*[^>]*href="[^"]*"[^>]*>([^<]+)</a>', html)
+        # Категория
+        cat_match = re.search(r'StreamCategory_root[^>]*href="[^"]*"[^>]*>([^<]+)</a>', html)
         if cat_match: category = cat_match.group(1).strip()
+        # Доп. поиск зрителей
         if viewers is None:
-            for pattern in [r'class="[^"]*ViewersCounter[^"]*"[^>]*>\s*<div[^>]*>(\d+)</div>', r'<div[^>]*class="[^"]*viewers[^"]*"[^>]*>\s*(\d+)\s*</div>']:
-                vm = re.search(pattern, html, re.IGNORECASE)
-                if vm:
-                    try:
-                        viewers = int(vm.group(1))
-                        live = True
-                        break
-                    except ValueError: pass
+            vm = re.search(r'class="[^"]*viewers[^"]*"[^>]*>\s*(\d+)\s*</div>', html, re.IGNORECASE)
+            if vm:
+                try: viewers = int(vm.group(1)); live = True
+                except ValueError: pass
+        # Thumb
         if not thumb:
             og_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             if og_img: thumb = og_img.group(1).strip()
             else:
                 tm = re.search(r'"thumbnailUrl"\s*:\s*"([^"]+)"', html)
                 if tm: thumb = tm.group(1)
+        # Playback URL для скриншотов
         if not playback_url:
-            for pattern in [r'(https?://[^"\']+/hls/[^"\']+\.m3u8[^"\']*)', r'"(?:playbackUrl|hlsUrl|streamUrl)"\s*:\s*"([^"]+)"']:
-                pm = re.search(pattern, html)
-                if pm: playback_url = pm.group(1); break
+            pm = re.search(r'(https?://[^"\']+/hls/[^"\']+\.m3u8[^"\']*)', html)
+            if pm: playback_url = pm.group(1)
+            else:
+                pm2 = re.search(r'"(?:playbackUrl|hlsUrl|streamUrl)"\s*:\s*"([^"]+)"', html)
+                if pm2: playback_url = pm2.group(1)
+
     if isinstance(viewers, int) and viewers > 0: live = True
     if title: title = _clean_stream_title(title)
+    
     log_line(f"VK Play final: live={live}, title='{title}', cat='{category}', viewers={viewers}, playback_url={playback_url is not None}")
     return {"live": bool(live), "title": trim(title, MAX_TITLE_LEN) if title else None, "category": trim(category, MAX_GAME_LEN) if category else None, "viewers": viewers, "thumb": thumb, "playback_url": playback_url}
+# ==================================================
 
 def build_caption(prefix: str, st: dict, kick: dict, vk: dict) -> str:
     running = fmt_running_line(st); lines: list[str] = []
@@ -820,9 +829,9 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
 
 def build_change_caption(st: dict, kick: dict, vk: dict, kt: bool, kc: bool, vt: bool, vc: bool) -> str:
     changes = []
-    if kc: changes.append("Категория Kick")
+    if kc: changes.append("Категория Kick"); 
     if kt: changes.append("Название Kick")
-    if vc: changes.append("Категория VK")
+    if vc: changes.append("Категория VK"); 
     if vt: changes.append("Название VK")
     lines: list[str] = [f"🟡 Обновление патока ({' • '.join(changes)})" if changes else "🟡 Обновление патока", "  "]
     if st.get("started_at"): lines.append(f"🕒 Старт (МСК): {fmt_msk(dt_from_iso(st.get('started_at')))}")
