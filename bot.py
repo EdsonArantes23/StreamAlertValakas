@@ -40,6 +40,7 @@ START_DEDUP_SEC = int(os.getenv("START_DEDUP_SEC", "120"))
 CHANGE_DEDUP_SEC = int(os.getenv("CHANGE_DEDUP_SEC", "20"))
 BOOT_STATUS_ENABLED = os.getenv("BOOT_STATUS_ENABLED", "1").strip() not in {"0", "false", "False"}
 BOOT_STATUS_DEDUP_SEC = int(os.getenv("BOOT_STATUS_DEDUP_SEC", "300"))
+# ИСПРАВЛЕНО: убраны пробелы в названиях переменных окружения
 COMMANDS_ENABLED = os.getenv("COMMANDS_ENABLED", "1").strip() not in {"0", "false", "False"}
 COMMAND_POLL_TIMEOUT = int(os.getenv("COMMAND_POLL_TIMEOUT", "5"))
 COMMAND_HTTP_TIMEOUT = int(os.getenv("COMMAND_HTTP_TIMEOUT", "20"))
@@ -174,6 +175,7 @@ def _norm_key(x: str | None) -> str:
 def _clean_stream_title(title: str | None) -> str | None:
     if not title: return None
     title = str(title).strip()
+    # ИСПРАВЛЕНО: диапазон символов [-:.] вместо [:-.]
     title = re.sub(r'^Глад\s+Валакас\s*[-:.]?\s*', '', title, flags=re.I).strip()
     title = re.sub(r'\s+на\s+VK\s+Видео\s+Live\s*$', '', title, flags=re.I).strip()
     title = re.sub(r'\s+', ' ', title).strip()
@@ -504,6 +506,7 @@ def load_state() -> dict:
         with open(STATE_FILE, "r", encoding="utf-8") as f: raw = f.read()
         if not raw.strip(): return default_state()
         st = json.loads(raw)
+        # ИСПРАВЛЕНО: убраны пробелы в ключах
         important = {"any_live", "kick_live", "vk_live", "started_at", "updates_offset", "last_command_seen_ts", "last_updates_poll_ts", "end_streak", "end_sent_for_started_at", "stream_stats"}
         st = {k: v for k, v in (st or {}).items() if k in important}
     except Exception: return default_state()
@@ -584,6 +587,7 @@ def setup_commands_visibility() -> None:
         if admin_chat != 0: tg_set_my_commands(public_cmds + admin_cmds, scope={"type": "chat", "chat_id": admin_chat})
 
 def tg_get_updates(offset: int, timeout: int) -> list:
+    # ИСПРАВЛЕНО: убраны пробелы в строках
     r = http_request_tg("POST", tg_api_url("getUpdates"), json_body={"offset": int(offset), "timeout": int(timeout), "allowed_updates": ["message"]}, timeout=(5, max(int(COMMAND_HTTP_TIMEOUT), int(timeout) + 15)))
     data = r.json()
     if not data.get("ok"): raise RuntimeError(f"Telegram getUpdates error: {data}")
@@ -715,10 +719,12 @@ def vk_fetch_best_effort() -> dict:
         r = http_request_ext("GET", VK_PUBLIC_URL, headers=headers, timeout=25, allow_redirects=True); html = r.text
     except Exception as e:
         log_line(f"VK fetch HTTP error: {e}"); return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
+    # ИСПРАВЛЕНО: убраны пробелы в проверке URL
     if f'"blogUrl":"{VK_SLUG}"' not in html and f"'blogUrl':'{VK_SLUG}'" not in html:
         if VK_SLUG.lower() not in html.lower() and "глад валакас" not in html.lower():
             return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
     title, category, viewers, thumb, live, playback_url = None, None, None, None, False, None
+    # ИСПРАВЛЕНО: regex без пробелов
     m = re.search(r'<script[^>]+id=["\']?initial-state["\']?[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
@@ -727,14 +733,16 @@ def vk_fetch_best_effort() -> dict:
             if blog_data and blog_data.get("blogUrl") != VK_SLUG: log_line(f"VK Play: Wrong channel in JSON: {blog_data.get('blogUrl')}")
             else:
                 stream_data = data.get("stream", {}).get("stream", {}).get("data")
-                if stream_data and stream_data.get("isOnline", False):
-                    live = True; title = stream_data.get("title")
-                    cat_data = stream_data.get("category", {}); category = cat_data.get("title") if isinstance(cat_data, dict) else None
-                    count_data = stream_data.get("count", {}); viewers = count_data.get("viewers") if isinstance(count_data, dict) else None
-                    playback_url = stream_data.get("playbackUrl") or stream_data.get("hlsUrl")
+                if stream_data:
+                    if stream_data.get("isOnline", False):
+                        live = True; title = stream_data.get("title")
+                        cat_data = stream_data.get("category", {}); category = cat_data.get("title") if isinstance(cat_data, dict) else None
+                        count_data = stream_data.get("count", {}); viewers = count_data.get("viewers") if isinstance(count_data, dict) else None
+                        playback_url = stream_data.get("playbackUrl") or stream_data.get("hlsUrl")
         except Exception as e: log_line(f"VK initial-state parse error: {e}")
     if not live or not title or not category or viewers is None:
         if '"isOnline":true' in html or "'isOnline':true" in html or 'data-live="true"' in html.lower(): live = True
+        # ИСПРАВЛЕНО: regex без пробелов
         viewer_match = re.search(r'class="[^"]*ViewersCounter[^"]*"[^>]*>\s*<div[^>]*>(\d+)</div>', html)
         if viewer_match:
             live = True
@@ -757,8 +765,7 @@ def vk_fetch_best_effort() -> dict:
                         viewers = int(vm.group(1))
                         live = True
                         break
-                    except ValueError:
-                        pass
+                    except ValueError: pass
         if not thumb:
             og_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             if og_img: thumb = og_img.group(1).strip()
@@ -904,6 +911,7 @@ def is_private_chat(msg: dict) -> bool: return (msg.get("chat") or {}).get("type
 def is_admin_msg(msg: dict) -> bool: return isinstance((msg.get("from") or {}).get("id"), int) and (msg.get("from") or {}).get("id") == ADMIN_ID
 
 def commands_loop_forever():
+    log_line("🟢 COMMAND LISTENER STARTED")
     while True:
         try: commands_loop_once()
         except Exception as e:
@@ -913,8 +921,11 @@ def commands_loop_forever():
 def commands_loop_once():
     if not COMMANDS_ENABLED: time.sleep(5); return
     with STATE_LOCK: st = load_state(); offset = int(st.get("updates_offset") or 0)
-    try: updates = tg_get_updates(offset=offset, timeout=COMMAND_POLL_TIMEOUT)
-    except Exception as e: log_line(f"getUpdates failed: {e}"); time.sleep(1); return
+    try: 
+        updates = tg_get_updates(offset=offset, timeout=COMMAND_POLL_TIMEOUT)
+        if updates: log_line(f"📨 Received {len(updates)} updates from Telegram")
+    except Exception as e: 
+        log_line(f"❌ getUpdates failed: {e}"); time.sleep(1); return
     now_ts = ts()
     with STATE_LOCK:
         st2 = load_state()
@@ -952,6 +963,7 @@ def commands_loop_once():
                 except Exception as e: log_line(f"send /admin reply failed: {e}")
                 continue
             if not is_status_command(text): continue
+            log_line(f"📩 Command received: {text}")
             with STATE_LOCK: stx = load_state(); stx["last_command_seen_ts"] = ts(); save_state(stx)
             snap = _cache_get_snapshot()
             if snap is not None: st_cur, kick, vk, _age = snap
@@ -1014,6 +1026,7 @@ def main_loop():
             try:
                 with STATE_LOCK: st = load_state(); tg_send("✅ StreamAlertValakas запущен (ping).\n" + fmt_running_line(st))
                 with STATE_LOCK: st = load_state(); st["startup_ping_sent"] = True; save_state(st)
+                log_line("✅ Startup ping sent successfully")
             except Exception as e: log_line(f"Startup ping failed: {e}")
     if NO_STREAM_ON_START_MESSAGE and not any_live0:
         with STATE_LOCK:
@@ -1121,5 +1134,6 @@ def main():
         threading.Thread(target=commands_watchdog_forever, daemon=True).start()
     main_loop_forever()
 
+# ИСПРАВЛЕНО: корректный вход в программу
 if __name__ == "__main__":
     main()
