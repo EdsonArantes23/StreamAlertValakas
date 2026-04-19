@@ -201,7 +201,7 @@ def _clean_stream_title(title: str | None) -> str | None:
     if not title:
         return None
     title = str(title).strip()
-    # ИСПРАВЛЕНО: [-:.] вместо [:-.] (диапазон символов)
+    # ИСПРАВЛЕНО: диапазон символов должен быть [-:.] или [.\-:]
     title = re.sub(r'^Глад\s+Валакас\s*[-:.]?\s*', '', title, flags=re.I).strip()
     title = re.sub(r'\s+на\s+VK\s+Видео\s+Live\s*$', '', title, flags=re.I).strip()
     title = re.sub(r'\s+', ' ', title).strip()
@@ -363,10 +363,7 @@ def build_end_report(st: dict) -> str:
             hm_e = fmt_msk_hm_from_ts(e)
             val = esc(seg.get("value") or "—")
             dur_hm = fmt_hhmm(e - s)
-            if value_style == 'b':
-                out.append(f"{hm_s}–{hm_e} — {val} ({dur_hm})")
-            else:
-                out.append(f"{hm_s}–{hm_e} — {val} ({dur_hm})")
+            out.append(f"{hm_s}–{hm_e} — {val} ({dur_hm})")
         return out
     def plat_block(label: str, key: str, url: str) -> list[str]:
         out: list[str] = []
@@ -636,7 +633,6 @@ def fmt_bytes(n: int) -> str:
         return f"{n} B"
     if n < 1024 ** 2:
         return f"{n/1024:.1f} KB"
-    # ИСПРАВЛЕНО: 10242 -> 1024**2
     if n < 1024 ** 3:
         return f"{n/1024**2:.1f} MB"
     return f"{n/1024**3:.2f} GB"
@@ -651,7 +647,6 @@ def dir_size_bytes(root: str) -> int:
                 fp = os.path.join(base, fn)
                 if os.path.islink(fp):
                     continue
-                # ИСПРАВЛЕНО: to tal -> total
                 total += os.path.getsize(fp)
             except Exception:
                 pass
@@ -667,7 +662,6 @@ def list_largest_files(root: str, topn: int = 5):
                 fp = os.path.join(base, fn)
                 if os.path.islink(fp):
                     continue
-                # ИСПРАВЛЕНО: si ze -> size
                 size = int(os.path.getsize(fp))
                 rel = os.path.relpath(fp, root)
                 items.append((size, rel))
@@ -714,7 +708,6 @@ def load_state() -> dict:
         if not raw.strip():
             return default_state()
         st = json.loads(raw)
-        # ИСПРАВЛЕНО: ключи без пробелов
         important = {"any_live", "kick_live", "vk_live", "started_at", "updates_offset",
                      "last_command_seen_ts", "last_updates_poll_ts", "end_streak",
                      "end_sent_for_started_at", "stream_stats"}
@@ -755,7 +748,7 @@ def save_state(state: dict) -> None:
                 return
             except OSError as e2:
                 if getattr(e2, "errno", None) == 28:
-                    notify_admin_dedup("no_space", "❌ No space left: не могу сохранить state.json. Освободи место (state.json, __pycache__, /tmp ffmpeg-).")
+                    notify_admin_dedup("no_space", "❌ No space left: не могу сохранить state.json. Освободи место.")
                     return
                 raise
         raise
@@ -990,7 +983,7 @@ def screenshot_from_m3u8_fast(playback_url: str) -> bytes | None:
         p = subprocess.run(cmd, capture_output=True, timeout=min(int(FFMPEG_TIMEOUT_SEC), int(FFMPEG_CMD_TIMEOUT_SEC)))
         if p.returncode != 0 or not p.stdout:
             return None
-        return p.stdout # ИСПРАВЛЕНО: p.s tdout
+        return p.stdout
     except Exception:
         return None
 
@@ -1045,7 +1038,6 @@ def kick_fetch() -> dict:
     }
 
 def vk_fetch_best_effort() -> dict:
-    """Fetch VK Play stream status with improved HTML parsing fallback and playback_url extraction."""
     headers = dict(HEADERS_HTML)
     headers.update({
         "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
@@ -1061,16 +1053,14 @@ def vk_fetch_best_effort() -> dict:
         log_line(f"VK fetch HTTP error: {e}")
         return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
     
-    # Проверка редиректа на другой канал (без лишних пробелов)
+    # Проверка редиректа
     if f'"blogUrl":"{VK_SLUG}"' not in html and f"'blogUrl':'{VK_SLUG}'" not in html:
         if VK_SLUG.lower() not in html.lower() and "глад валакас" not in html.lower():
-            log_line(f"VK Play: Page redirected or not found for {VK_SLUG}")
             return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
     
     title, category, viewers, thumb, live, playback_url = None, None, None, None, False, None
     
-    # Метод 1: Парсинг initial-state JSON
-    # ИСПРАВЛЕНО: regex без лишних пробелов
+    # JSON parse
     m = re.search(r'<script[^>]+id=["\']?initial-state["\']?[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
@@ -1080,10 +1070,10 @@ def vk_fetch_best_effort() -> dict:
                 log_line(f"VK Play: Wrong channel in JSON: {blog_data.get('blogUrl')}")
             else:
                 stream_data = data.get("stream", {}).get("stream", {}).get("data")
-                if stream_
+                if stream_data:  # ИСПРАВЛЕНО ОШИБКУ СИНТАКСИСА ЗДЕСЬ
                     if stream_data.get("isOnline", False):
                         live = True
-                        title = stream_
+                        title = stream_data.get("title")
                         cat_data = stream_data.get("category", {})
                         if isinstance(cat_data, dict):
                             category = cat_data.get("title")
@@ -1094,12 +1084,10 @@ def vk_fetch_best_effort() -> dict:
         except Exception as e:
             log_line(f"VK initial-state parse error: {e}")
     
-    # Метод 2: HTML-парсинг по классам (fallback)
+    # Fallback HTML parse
     if not live or not title or not category or viewers is None:
-        # Проверка live-статуса
         if '"isOnline":true' in html or "'isOnline':true" in html or 'data-live="true"' in html.lower():
             live = True
-        # Извлечение зрителей по классу ViewersCounter
         viewer_match = re.search(r'class="[^"]*ViewersCounter[^"]*"[^>]*>\s*<div[^>]*>(\d+)</div>', html)
         if viewer_match:
             live = True
@@ -1107,7 +1095,6 @@ def vk_fetch_best_effort() -> dict:
                 viewers = int(viewer_match.group(1))
             except ValueError:
                 pass
-        # Извлечение названия по классу StreamTitle_root
         title_match = re.search(r'class="[^"]*StreamTitle_root[^"]*[^>]*>\s*<div[^>]*data-role="markup"[^>]*>([^<]+)</div>', html)
         if title_match:
             title = title_match.group(1).strip()
@@ -1117,11 +1104,9 @@ def vk_fetch_best_effort() -> dict:
                 t = og_title.group(1).strip()
                 if VK_SLUG.lower() in t.lower() or "глад валакас" in t.lower():
                     title = _clean_stream_title(t)
-        # Извлечение категории по классу StreamCategory_root
         cat_match = re.search(r'class="[^"]*StreamCategory_root[^"]*[^>]*href="[^"]*"[^>]*>([^<]+)</a>', html)
         if cat_match:
             category = cat_match.group(1).strip()
-        # Дополнительный поиск зрителей, если не найдено
         if viewers is None:
             for pattern in [r'class="[^"]*ViewersCounter[^"]*"[^>]*>\s*<div[^>]*>(\d+)</div>', r'<div[^>]*class="[^"]*viewers[^"]*"[^>]*>\s*(\d+)\s*</div>']:
                 vm = re.search(pattern, html, re.IGNORECASE)
@@ -1132,7 +1117,6 @@ def vk_fetch_best_effort() -> dict:
                         break
                     except ValueError:
                         pass
-        # Извлечение thumbnail
         if not thumb:
             og_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             if og_img:
@@ -1141,7 +1125,6 @@ def vk_fetch_best_effort() -> dict:
                 thumb_match = re.search(r'"thumbnailUrl"\s*:\s*"([^"]+)"', html)
                 if thumb_match:
                     thumb = thumb_match.group(1)
-        # Поиск playback_url для скриншотов
         if not playback_url:
             for pattern in [r'(https?://[^"\']+/hls/[^"\']+\.m3u8[^"\']*)', r'"(?:playbackUrl|hlsUrl|streamUrl)"\s*:\s*"([^"]+)"']:
                 pm = re.search(pattern, html)
@@ -1149,7 +1132,6 @@ def vk_fetch_best_effort() -> dict:
                     playback_url = pm.group(1)
                     break
     
-    # Финальная валидация: если есть зрители > 0, считаем стрим живым
     if isinstance(viewers, int) and viewers > 0:
         live = True
     if title:
@@ -1415,8 +1397,8 @@ def build_admin_diag_text(st: dict, webhook_info: dict) -> str:
         f"- Подтверждений конца: {end_streak} (нужно {END_CONFIRM_STREAK}) ✅\n\n"
         "Команды в Телеграм:\n"
         f"- Бот 'на связи': {on_air_icon} {on_air_text} (последний опрос: {_age_str(poll_age)} назад)\n"
-        f"- Последняя команда (/stream и т.п.): {_age_str(cmd_age)} назад)\n"
-        f"- Самовосстановление (watchdog): {_age_str(rec_age)} назад)\n\n"
+        f"- Последняя команда (/stream и т.п.): {_age_str(cmd_age)} назад\n"
+        f"- Самовосстановление (watchdog): {_age_str(rec_age)} назад\n\n"
         "Очередь сообщений Telegram:\n"
         f"- Webhook: {webhook_state}\n"
         f"- В очереди Telegram: {esc(pend)} (сколько апдейтов ждут доставки)\n"
@@ -1502,7 +1484,7 @@ def commands_loop_once():
             if not text_stripped:
                 continue
             text_parts = text_stripped.split()
-            if not text_parts: 
+            if not text_parts:
                 continue
             cmd = text_parts[0].split("@")[0]
             if cmd in ADMIN_COMMANDS:
@@ -1865,6 +1847,5 @@ def main():
         threading.Thread(target=commands_watchdog_forever, daemon=True).start()
     main_loop_forever()
 
-# ИСПРАВЛЕНО: __name__ == "__main__"
 if __name__ == "__main__":
     main()
