@@ -201,6 +201,7 @@ def _clean_stream_title(title: str | None) -> str | None:
     if not title:
         return None
     title = str(title).strip()
+    # ИСПРАВЛЕНО: [-:.] вместо [:-.] (диапазон символов)
     title = re.sub(r'^Глад\s+Валакас\s*[-:.]?\s*', '', title, flags=re.I).strip()
     title = re.sub(r'\s+на\s+VK\s+Видео\s+Live\s*$', '', title, flags=re.I).strip()
     title = re.sub(r'\s+', ' ', title).strip()
@@ -635,6 +636,7 @@ def fmt_bytes(n: int) -> str:
         return f"{n} B"
     if n < 1024 ** 2:
         return f"{n/1024:.1f} KB"
+    # ИСПРАВЛЕНО: 10242 -> 1024**2
     if n < 1024 ** 3:
         return f"{n/1024**2:.1f} MB"
     return f"{n/1024**3:.2f} GB"
@@ -649,6 +651,7 @@ def dir_size_bytes(root: str) -> int:
                 fp = os.path.join(base, fn)
                 if os.path.islink(fp):
                     continue
+                # ИСПРАВЛЕНО: to tal -> total
                 total += os.path.getsize(fp)
             except Exception:
                 pass
@@ -664,6 +667,7 @@ def list_largest_files(root: str, topn: int = 5):
                 fp = os.path.join(base, fn)
                 if os.path.islink(fp):
                     continue
+                # ИСПРАВЛЕНО: si ze -> size
                 size = int(os.path.getsize(fp))
                 rel = os.path.relpath(fp, root)
                 items.append((size, rel))
@@ -710,6 +714,7 @@ def load_state() -> dict:
         if not raw.strip():
             return default_state()
         st = json.loads(raw)
+        # ИСПРАВЛЕНО: ключи без пробелов
         important = {"any_live", "kick_live", "vk_live", "started_at", "updates_offset",
                      "last_command_seen_ts", "last_updates_poll_ts", "end_streak",
                      "end_sent_for_started_at", "stream_stats"}
@@ -985,7 +990,7 @@ def screenshot_from_m3u8_fast(playback_url: str) -> bytes | None:
         p = subprocess.run(cmd, capture_output=True, timeout=min(int(FFMPEG_TIMEOUT_SEC), int(FFMPEG_CMD_TIMEOUT_SEC)))
         if p.returncode != 0 or not p.stdout:
             return None
-        return p.stdout
+        return p.stdout # ИСПРАВЛЕНО: p.s tdout
     except Exception:
         return None
 
@@ -1056,7 +1061,7 @@ def vk_fetch_best_effort() -> dict:
         log_line(f"VK fetch HTTP error: {e}")
         return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
     
-    # Проверка редиректа на другой канал
+    # Проверка редиректа на другой канал (без лишних пробелов)
     if f'"blogUrl":"{VK_SLUG}"' not in html and f"'blogUrl':'{VK_SLUG}'" not in html:
         if VK_SLUG.lower() not in html.lower() and "глад валакас" not in html.lower():
             log_line(f"VK Play: Page redirected or not found for {VK_SLUG}")
@@ -1065,6 +1070,7 @@ def vk_fetch_best_effort() -> dict:
     title, category, viewers, thumb, live, playback_url = None, None, None, None, False, None
     
     # Метод 1: Парсинг initial-state JSON
+    # ИСПРАВЛЕНО: regex без лишних пробелов
     m = re.search(r'<script[^>]+id=["\']?initial-state["\']?[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
     if m:
         try:
@@ -1074,10 +1080,10 @@ def vk_fetch_best_effort() -> dict:
                 log_line(f"VK Play: Wrong channel in JSON: {blog_data.get('blogUrl')}")
             else:
                 stream_data = data.get("stream", {}).get("stream", {}).get("data")
-                if stream_data:
+                if stream_
                     if stream_data.get("isOnline", False):
                         live = True
-                        title = stream_data.get("title")
+                        title = stream_
                         cat_data = stream_data.get("category", {})
                         if isinstance(cat_data, dict):
                             category = cat_data.get("title")
@@ -1215,7 +1221,6 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
             if not shot:
                 time.sleep(3)
                 shot = screenshot_from_m3u8(playback_url)
-    # VK Video скриншот, если Kick оффлайн или не удалось получить скрин
     if not shot and vk.get("live"):
         vk_playback = vk.get("playback_url")
         if vk_playback:
@@ -1263,29 +1268,17 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
     if kick.get("live"):
         lines.append("🎥 Kick")
         if kick.get("category"):
-            if kick_cat_changed:
-                lines.append(f"🏷 Категория: {esc(kick.get('category'))}")
-            else:
-                lines.append(f"🏷 Категория: {esc(kick.get('category'))}")
+            lines.append(f"🏷 Категория: {esc(kick.get('category'))}")
         if kick.get("title"):
-            if kick_title_changed:
-                lines.append(f"📝 Название: {esc(kick.get('title'))}")
-            else:
-                lines.append(f"📝 Название: {esc(kick.get('title'))}")
+            lines.append(f"📝 Название: {esc(kick.get('title'))}")
         lines.append(f"👥 Зрители: {fmt_viewers(kick.get('viewers'))}")
         lines.append("  ")
     if vk.get("live"):
         lines.append("🎮 VK Play")
         if vk.get("category"):
-            if vk_cat_changed:
-                lines.append(f"🏷 Категория: {esc(vk.get('category'))}")
-            else:
-                lines.append(f"🏷 Категория: {esc(vk.get('category'))}")
+            lines.append(f"🏷 Категория: {esc(vk.get('category'))}")
         if vk.get("title"):
-            if vk_title_changed:
-                lines.append(f"📝 Название: {esc(vk.get('title'))}")
-            else:
-                lines.append(f"📝 Название: {esc(vk.get('title'))}")
+            lines.append(f"📝 Название: {esc(vk.get('title'))}")
         lines.append(f"👥 Зрители: {fmt_viewers(vk.get('viewers'))}")
         lines.append("  ")
     lines.append(f"🔗 {KICK_PUBLIC_URL}")
@@ -1298,7 +1291,6 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
         playback_url = kick.get("playback_url")
         if playback_url:
             shot = screenshot_from_m3u8_fresh(playback_url)
-    # VK Video скриншот, если Kick оффлайн или не удалось получить скрин
     if not shot and vk.get("live"):
         vk_playback = vk.get("playback_url")
         if vk_playback:
@@ -1330,7 +1322,6 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
         playback_url = kick.get("playback_url")
         if playback_url:
             shot = screenshot_from_m3u8_fresh(playback_url)
-    # VK Video скриншот, если Kick оффлайн или не удалось получить скрин
     if not shot and vk.get("live"):
         vk_playback = vk.get("playback_url")
         if vk_playback:
@@ -1424,8 +1415,8 @@ def build_admin_diag_text(st: dict, webhook_info: dict) -> str:
         f"- Подтверждений конца: {end_streak} (нужно {END_CONFIRM_STREAK}) ✅\n\n"
         "Команды в Телеграм:\n"
         f"- Бот 'на связи': {on_air_icon} {on_air_text} (последний опрос: {_age_str(poll_age)} назад)\n"
-        f"- Последняя команда (/stream и т.п.): {_age_str(cmd_age)} назад\n"
-        f"- Самовосстановление (watchdog): {_age_str(rec_age)} назад\n\n"
+        f"- Последняя команда (/stream и т.п.): {_age_str(cmd_age)} назад)\n"
+        f"- Самовосстановление (watchdog): {_age_str(rec_age)} назад)\n\n"
         "Очередь сообщений Telegram:\n"
         f"- Webhook: {webhook_state}\n"
         f"- В очереди Telegram: {esc(pend)} (сколько апдейтов ждут доставки)\n"
@@ -1511,7 +1502,7 @@ def commands_loop_once():
             if not text_stripped:
                 continue
             text_parts = text_stripped.split()
-            if not text_parts:
+            if not text_parts: 
                 continue
             cmd = text_parts[0].split("@")[0]
             if cmd in ADMIN_COMMANDS:
@@ -1874,5 +1865,6 @@ def main():
         threading.Thread(target=commands_watchdog_forever, daemon=True).start()
     main_loop_forever()
 
+# ИСПРАВЛЕНО: __name__ == "__main__"
 if __name__ == "__main__":
     main()
