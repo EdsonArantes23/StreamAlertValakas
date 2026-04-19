@@ -16,10 +16,8 @@ import requests
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 def _mask_secrets(text: str) -> str:
-    try:
-        s = str(text)
-    except Exception:
-        return ''
+    try: s = str(text)
+    except Exception: return ''
     try:
         if BOT_TOKEN: s = s.replace(BOT_TOKEN, '***')
     except Exception: pass
@@ -710,7 +708,8 @@ def kick_fetch() -> dict:
     return {"live": is_live, "title": trim(title, MAX_TITLE_LEN), "category": trim(cat, MAX_GAME_LEN), "viewers": viewers, "thumb": thumb, "created_at": created_at, "playback_url": playback_url}
 
 def vk_fetch_best_effort() -> dict:
-    headers = dict(HEADERS_HTML); headers.update({"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8", "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate"})
+    headers = dict(HEADERS_HTML)
+    headers.update({"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8", "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate"})
     html = None
     try:
         r = http_request_ext("GET", VK_PUBLIC_URL, headers=headers, timeout=25, allow_redirects=True); html = r.text
@@ -736,9 +735,10 @@ def vk_fetch_best_effort() -> dict:
         except Exception as e: log_line(f"VK initial-state parse error: {e}")
     if not live or not title or not category or viewers is None:
         if '"isOnline":true' in html or "'isOnline':true" in html or 'data-live="true"' in html.lower(): live = True
-        for pattern in [r'ViewersCounter[^>]*>\s*<div[^>]*>(\d+)</div>', r'class="[^"]*viewers[^"]*"[^>]*>\s*(\d+)\s*</div>']:
-            vm = re.search(pattern, html)
-            if vm: try: viewers = int(vm.group(1)); live = True; break
+        viewer_match = re.search(r'class="[^"]*ViewersCounter[^"]*"[^>]*>\s*<div[^>]*>(\d+)</div>', html)
+        if viewer_match:
+            live = True
+            try: viewers = int(viewer_match.group(1))
             except ValueError: pass
         title_match = re.search(r'class="[^"]*StreamTitle_root[^"]*[^>]*>\s*<div[^>]*data-role="markup"[^>]*>([^<]+)</div>', html)
         if title_match: title = title_match.group(1).strip()
@@ -749,6 +749,16 @@ def vk_fetch_best_effort() -> dict:
                 if VK_SLUG.lower() in t.lower() or "глад валакас" in t.lower(): title = _clean_stream_title(t)
         cat_match = re.search(r'class="[^"]*StreamCategory_root[^"]*[^>]*href="[^"]*"[^>]*>([^<]+)</a>', html)
         if cat_match: category = cat_match.group(1).strip()
+        if viewers is None:
+            for pattern in [r'class="[^"]*ViewersCounter[^"]*"[^>]*>\s*<div[^>]*>(\d+)</div>', r'<div[^>]*class="[^"]*viewers[^"]*"[^>]*>\s*(\d+)\s*</div>']:
+                vm = re.search(pattern, html, re.IGNORECASE)
+                if vm:
+                    try:
+                        viewers = int(vm.group(1))
+                        live = True
+                        break
+                    except ValueError:
+                        pass
         if not thumb:
             og_img = re.search(r'property=["\']?og:image["\']?[^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
             if og_img: thumb = og_img.group(1).strip()
@@ -761,7 +771,7 @@ def vk_fetch_best_effort() -> dict:
                 if pm: playback_url = pm.group(1); break
     if isinstance(viewers, int) and viewers > 0: live = True
     if title: title = _clean_stream_title(title)
-    log_line(f"VK Play final: live={live}, title='{title}', cat='{category}', viewers={viewers}, playback_url={playback_url}")
+    log_line(f"VK Play final: live={live}, title='{title}', cat='{category}', viewers={viewers}, playback_url={playback_url is not None}")
     return {"live": bool(live), "title": trim(title, MAX_TITLE_LEN) if title else None, "category": trim(category, MAX_GAME_LEN) if category else None, "viewers": viewers, "thumb": thumb, "playback_url": playback_url}
 
 def build_caption(prefix: str, st: dict, kick: dict, vk: dict) -> str:
