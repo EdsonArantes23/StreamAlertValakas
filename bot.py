@@ -1053,7 +1053,7 @@ def kick_fetch() -> dict:
         return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
 
 def vk_fetch_best_effort() -> dict:
-    """Parse VK Video page using HTML extraction with multiple live checks."""
+    """Parse VK Video page - checks isOnline in JSON data first."""
     headers = dict(HEADERS_HTML)
     headers.update({
         "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
@@ -1065,125 +1065,93 @@ def vk_fetch_best_effort() -> dict:
         r = http_request_ext("GET", VK_PUBLIC_URL, headers=headers, timeout=25, allow_redirects=True)
         html = r.text
         
-        log_line(f"VK Play page size: {len(html)} bytes, URL: {r.url}")
+        log_line(f"VK Play page size: {len(html)} bytes")
         
-        # CRITICAL CHECK: If redirected to main page or wrong page, stream is offline
-        if VK_SLUG not in r.url:
-            log_line(f"VK Play: Not on channel page (URL: {r.url}), stream is offline")
-            return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
+        # METHOD 1: Check isOnline in JSON data - MOST RELIABLE
+        stream_json_matches = re.findall(r'"isOnline"\s*:\s*(true|false)', html, re.IGNORECASE)
         
-        # Check for explicit offline indicators
-        offline_patterns = [
-            r'(?:нет\s+стрима|не\s+вещает|offline|not\s+live)',
-            r'"isOnline"\s*:\s*false',
-            r'"is_live"\s*:\s*false',
-            r'"liveStatus"\s*:\s*"off"',
-        ]
-        
-        for pattern in offline_patterns:
-            if re.search(pattern, html, re.IGNORECASE):
-                log_line(f"VK Play: Found offline indicator: {pattern}")
+        for match in stream_json_matches:
+            if match.lower() == 'true':
+                log_line(f"VK Play: Found isOnline=true in JSON - stream IS LIVE")
+                break
+            elif match.lower() == 'false':
+                log_line(f"VK Play: Found isOnline=false in JSON - stream is OFFLINE")
                 return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
         
-        # MULTI-METHOD LIVE DETECTION
-        live_evidence = 0
-        
-        # Method 1: Check for isLive in JSON data
-        live_json_patterns = [
-            r'"isOnline"\s*:\s*(true)',
-            r'"is_live"\s*:\s*(true)',
-            r'"liveStatus"\s*:\s*"(live|online)"',
-            r'isLive["\']?\s*:\s*(true)',
+        # METHOD 2: Check for explicit offline indicators
+        offline_indicators = [
+            r'streamEnded["\']?\s*:\s*["\']Трансляция завершена["\']',
+            r'streamEnded["\']?\s*:\s*["\']Трансляция окончена["\']',
+            r'offline["\']?\s*:\s*["\']Стример не в сети["\']',
+            r'streamOffline["\']?\s*:\s*["\']Трансляция приостановлена["\']',
         ]
         
-        for pattern in live_json_patterns:
-            match = re.search(pattern, html, re.IGNORECASE)
-            if match:
-                live_evidence += 2
-                log_line(f"VK Play: Live JSON evidence found")
-                break
-        
-        # Method 2: Check for viewer counter with ViewersCounter_isLive class
-        # This is the MOST RELIABLE indicator - only present during actual live streams
-        live_viewer_pattern = r'ViewersCounter_isLive'
-        if re.search(live_viewer_pattern, html, re.IGNORECASE):
-            live_evidence += 3
-            log_line(f"VK Play: Live viewer counter found (ViewersCounter_isLive)")
-        
-        # Method 3: Check for stream player elements
-        player_patterns = [
-            r'class="[^"]*Player[^"]*"',
-            r'class="[^"]*StreamPlayer[^"]*"',
-            r'class="[^"]*VideoPlayer[^"]*"',
-            r'<video[^>]*src=',
-        ]
-        
-        for pattern in player_patterns:
+        for pattern in offline_indicators:
             if re.search(pattern, html, re.IGNORECASE):
-                live_evidence += 1
-                break
+                log_line(f"VK Play: Found offline text indicator")
+                return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
         
-        # Method 4: Try to find HLS stream URL (only present during live)
-        if re.search(r'\.m3u8', html, re.IGNORECASE):
-            live_evidence += 3
-            log_line(f"VK Play: HLS stream URL found")
+        # METHOD 3: Check for Live badge
+        has_live_badge = bool(re.search(r'LiveBadge.*?isLive["\']?\s*:\s*["\']Live["\']', html, re.IGNORECASE))
         
-        # REVISED DECISION: Require at least 4 evidence points for live status
-        is_live = (live_evidence >= 4)
+        # METHOD 4: Check if there's actual stream content (not just cached)
+        has_m3u8 = bool(re.search(r'\.m3u8', html, re.IGNORECASE))
         
-        log_line(f"VK Play: Live evidence score={live_evidence}, is_live={is_live}")
+        is_live = has_live_badge or has_m3u8
         
-        # Parse viewers ONLY if we detected live status
+        log_line(f"VK Play: LiveBadge={has_live_badge}, M3U8={has_m3u8}, isLive={is_live}")
+        
+        if not is_live:
+            log_line(f"VK Play: No live indicators found, returning offline")
+            return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
+        
+        # Parse stream data only if live
         viewers = None
-        if is_live:
-            viewers_match = re.search(r'ViewersCounter[^>]*isLive[^>]*>.*?<div>(\d+)</div>', html, re.IGNORECASE | re.DOTALL)
-            if not viewers_match:
-                viewers_match = re.search(r'ViewersCounter[^>]*>.*?<div>(\d+)</div>', html, re.IGNORECASE | re.DOTALL)
-            if viewers_match:
-                try:
-                    viewers = int(viewers_match.group(1))
-                except:
-                    pass
-        
-        # Parse stream title
         title = None
-        if is_live:
-            title_match = re.search(r'StreamTitle[^>]*>.*?data-role=["\']markup["\'][^>]*>([^<]+)</div>', html, re.IGNORECASE | re.DOTALL)
-            if not title_match:
-                title_match = re.search(r'BlockRenderer_markup[^>]*>([^<]+)</div>', html, re.IGNORECASE)
-            if title_match:
-                title = title_match.group(1).strip()
-                if len(title) > 200:
-                    title = None
-        
-        # Parse category - only if live
         category = None
-        if is_live:
-            cat_match = re.search(r'StreamCategory[^>]*>([^<]+)</a>', html, re.IGNORECASE)
-            if not cat_match:
-                cat_match = re.search(r'StreamTag[^>]*>.*?href=["\']/app/category/[^"\']+["\'][^>]*>([^<]+)<', html, re.IGNORECASE | re.DOTALL)
-            if cat_match:
-                category = cat_match.group(1).strip()
-        
-        # Get thumbnail - only useful for preview, not live indicator
         thumb = None
-        if is_live:
-            thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-            if thumb_match:
-                thumb = thumb_match.group(1)
+        
+        # Parse viewers
+        viewers_matches = re.findall(r'ViewersCounter_isLive[^>]*>.*?<div>(\d+)</div>', html, re.IGNORECASE | re.DOTALL)
+        if viewers_matches:
+            try:
+                viewers = int(viewers_matches[-1])
+            except:
+                pass
+        
+        # Parse title
+        title_match = re.search(r'StreamTitle[^>]*>.*?data-role=["\']markup["\'][^>]*>([^<]+)</div>', html, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'BlockRenderer_markup[^>]*>([^<]+)</div>', html, re.IGNORECASE)
+        if title_match:
+            title = title_match.group(1).strip()
+            if len(title) > 200:
+                title = None
+        
+        # Parse category
+        cat_match = re.search(r'StreamCategory[^>]*>([^<]+)</a>', html, re.IGNORECASE)
+        if not cat_match:
+            cat_match = re.search(r'StreamTag[^>]*>.*?href=["\']/app/category/[^"\']+["\'][^>]*>([^<]+)<', html, re.IGNORECASE | re.DOTALL)
+        if cat_match:
+            category = cat_match.group(1).strip()
+        
+        # Get thumbnail
+        thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if thumb_match:
+            thumb = thumb_match.group(1)
         
         # Clean title
         if title:
             title = _clean_stream_title(title)
         
-        log_line(f"VK Play final: live={is_live}, title='{title}', cat='{category}', viewers={viewers}, evidence={live_evidence}")
+        log_line(f"VK Play final: live=True, title='{title}', cat='{category}', viewers={viewers}")
         
         return {
-            "live": bool(is_live),
+            "live": True,
             "title": trim(title, MAX_TITLE_LEN) if title else None,
             "category": trim(category, MAX_GAME_LEN) if category else None,
             "viewers": viewers,
-            "thumb": thumb if is_live else None  # Don't return thumb if offline
+            "thumb": thumb
         }
         
     except Exception as e:
@@ -1637,16 +1605,8 @@ def main_loop_forever():
 
 def main_loop():
     # Initial fetch
-    try:
-        kick0 = kick_fetch()
-    except Exception as e:
-        kick0 = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
-        log_line(f"Kick init fetch error: {e}")
-    try:
-        vk0 = vk_fetch_best_effort()
-    except Exception as e:
-        vk0 = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
-        log_line(f"VK init fetch error: {e}")
+    kick0 = kick_fetch()
+    vk0 = vk_fetch_best_effort()
     
     any_live0 = bool(kick0.get("live") or vk0.get("live"))
     
@@ -1745,7 +1705,7 @@ def main_loop():
         
         log_line(f"POLL: Kick={kick_live}, VK={vk_live}, any={any_live} | Prev: any={prev_any}, K={prev_kick_live}, VK={prev_vk_live}, streak={prev_end_streak}")
         
-        # ===== SCENARIO 1: STREAM START (No stream -> Stream) =====
+        # ===== SCENARIO 1: STREAM START =====
         if (not prev_any) and any_live:
             log_line(f">>> STREAM START DETECTED <<<")
             with STATE_LOCK:
