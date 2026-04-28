@@ -50,7 +50,7 @@ STATE_FILE = os.getenv("STATE_FILE", "state.json")
 
 START_DEDUP_SEC = int(os.getenv("START_DEDUP_SEC", "120"))
 CHANGE_DEDUP_SEC = int(os.getenv("CHANGE_DEDUP_SEC", "20"))
-PLATFORM_TOGGLE_DEDUP_SEC = int(os.getenv("PLATFORM_TOGGLE_DEDUP_SEC", "10"))  # УМЕНЬШЕНО с 15 до 10
+PLATFORM_TOGGLE_DEDUP_SEC = int(os.getenv("PLATFORM_TOGGLE_DEDUP_SEC", "10"))
 
 BOOT_STATUS_ENABLED = os.getenv("BOOT_STATUS_ENABLED", "1").strip() not in {"0", "false", "False"}
 BOOT_STATUS_DEDUP_SEC = int(os.getenv("BOOT_STATUS_DEDUP_SEC", "300"))
@@ -93,9 +93,8 @@ MAX_TITLE_LEN = int(os.getenv("MAX_TITLE_LEN", "180"))
 MAX_GAME_LEN = int(os.getenv("MAX_GAME_LEN", "120"))
 
 END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "30"))
-# Добавлены переменные для отслеживания переходного периода
-TRANSITION_GRACE_PERIOD_SEC = int(os.getenv("TRANSITION_GRACE_PERIOD_SEC", "90"))  # 90 секунд ожидания перехода между площадками
-TRANSITION_STREAK_THRESHOLD = int(os.getenv("TRANSITION_STREAK_THRESHOLD", "3"))  # После 3 проверок без стрима начинаем считать end_streak
+TRANSITION_GRACE_PERIOD_SEC = int(os.getenv("TRANSITION_GRACE_PERIOD_SEC", "90"))
+TRANSITION_STREAK_THRESHOLD = int(os.getenv("TRANSITION_STREAK_THRESHOLD", "3"))
 
 NOTIFY_409_EVERY_SEC = 6 * 60 * 60
 
@@ -474,8 +473,8 @@ def reset_stream_session(st: dict) -> None:
     st["end_streak"] = 0
     st["end_sent_for_started_at"] = None
     st["end_sent_ts"] = 0
-    st["transition_streak"] = 0  # Добавлено: сброс переходного счетчика
-    st["last_any_live_ts"] = 0    # Добавлено: сброс времени последнего any_live
+    st["transition_streak"] = 0
+    st["last_any_live_ts"] = 0
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
     if not kick.get("live"):
@@ -1064,12 +1063,11 @@ def vk_fetch_best_effort() -> dict:
         "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
-        "Cache-Control": "no-cache",  # Добавлено: предотвращаем кэширование
-        "Pragma": "no-cache"          # Добавлено: предотвращаем кэширование
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
     })
     
     try:
-        # Добавляем уникальный параметр для предотвращения кэширования
         url = bust(VK_PUBLIC_URL) or VK_PUBLIC_URL
         r = http_request_ext("GET", url, headers=headers, timeout=25, allow_redirects=True)
         html = r.text
@@ -1099,7 +1097,7 @@ def vk_fetch_best_effort() -> dict:
         
         for pattern in offline_indicators:
             if re.search(pattern, html, re.IGNORECASE):
-                if not found_online:  # Только если нет признаков онлайн
+                if not found_online:
                     log_line(f"VK Play: Found offline text indicator")
                     return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
         
@@ -1109,7 +1107,6 @@ def vk_fetch_best_effort() -> dict:
         # METHOD 4: Check if there's actual stream content (not just cached)
         has_m3u8 = bool(re.search(r'\.m3u8[^"\']*["\']?', html, re.IGNORECASE))
         
-        # Дополнительная проверка: ищем любые признаки живого стрима
         has_video_player = bool(re.search(r'(video_player|videoplayer|stream_player|player_container)', html, re.IGNORECASE))
         has_viewer_count = bool(re.search(r'(зрител|смотрят|viewers|watchers)', html, re.IGNORECASE))
         
@@ -1741,26 +1738,27 @@ def main_loop():
         if (not prev_any) and any_live:
             log_line(f">>> STREAM START DETECTED <<<")
             with STATE_LOCK:
-                st = load_state()
-                last = int(st.get("last_start_sent_ts") or 0)
-            if ts() - last >= START_DEDUP_SEC:
+                st_start = load_state()
+                last = int(st_start.get("last_start_sent_ts") or 0)
+            if current_ts - last >= START_DEDUP_SEC:
                 with STATE_LOCK:
                     st_start = load_state()
                     reset_stream_session(st_start)
                     set_started_at_from_kick(st_start, kick, force=True)
                     st_start["end_streak"] = 0
                     st_start["transition_streak"] = 0
+                    st_start["last_any_live_ts"] = current_ts
                     save_state(st_start)
                 try:
                     with STATE_LOCK:
-                        st = load_state()
-                    send_status_with_screen("🚨🚨 🧩 Глад Валакас запустил паток! 🚨🚨", st, kick, vk)
+                        st_send = load_state()
+                    send_status_with_screen("🚨🚨 🧩 Глад Валакас запустил паток! 🚨🚨", st_send, kick, vk)
                     with STATE_LOCK:
-                        st = load_state()
-                        st["last_start_sent_ts"] = ts()
-                        st["last_change_sent_ts"] = ts()
-                        st["last_platform_toggle_ts"] = ts()
-                        save_state(st)
+                        st_update = load_state()
+                        st_update["last_start_sent_ts"] = current_ts
+                        st_update["last_change_sent_ts"] = current_ts
+                        st_update["last_platform_toggle_ts"] = current_ts
+                        save_state(st_update)
                     log_line("SENT: Stream start notification")
                 except Exception as e:
                     log_line(f"Start send error: {e}")
@@ -1792,20 +1790,19 @@ def main_loop():
             
             if platform_changed:
                 with STATE_LOCK:
-                    st = load_state()
-                    last = int(st.get("last_platform_toggle_ts") or 0)
-                # УМЕНЬШЕНА задержка дедупликации для смены площадок
+                    st_toggle = load_state()
+                    last = int(st_toggle.get("last_platform_toggle_ts") or 0)
                 if current_ts - last >= PLATFORM_TOGGLE_DEDUP_SEC:
                     try:
                         with STATE_LOCK:
-                            st = load_state()
+                            st_toggle = load_state()
                         prefix = f"🔄 {' • '.join(change_desc)}"
-                        send_status_with_screen(prefix, st, kick, vk)
+                        send_status_with_screen(prefix, st_toggle, kick, vk)
                         with STATE_LOCK:
-                            st = load_state()
-                            st["last_platform_toggle_ts"] = current_ts
-                            st["last_change_sent_ts"] = current_ts
-                            save_state(st)
+                            st_update = load_state()
+                            st_update["last_platform_toggle_ts"] = current_ts
+                            st_update["last_change_sent_ts"] = current_ts
+                            save_state(st_update)
                         log_line(f"SENT: Platform toggle notification: {change_desc}")
                     except Exception as e:
                         log_line(f"Platform toggle send error: {e}")
@@ -1830,70 +1827,73 @@ def main_loop():
             if changed:
                 log_line(f">>> CHANGES: K title={kick_title_changed}, K cat={kick_cat_changed}, V title={vk_title_changed}, V cat={vk_cat_changed}")
                 with STATE_LOCK:
-                    st = load_state()
-                    last = int(st.get("last_change_sent_ts") or 0)
+                    st_chg = load_state()
+                    last = int(st_chg.get("last_change_sent_ts") or 0)
                 if current_ts - last >= CHANGE_DEDUP_SEC:
                     try:
                         with STATE_LOCK:
-                            st = load_state()
-                        caption = build_change_caption(st, kick, vk, kick_title_changed, kick_cat_changed, vk_title_changed, vk_cat_changed)
-                        send_caption_with_screen(caption, st, kick, vk)
+                            st_chg = load_state()
+                        caption = build_change_caption(st_chg, kick, vk, kick_title_changed, kick_cat_changed, vk_title_changed, vk_cat_changed)
+                        send_caption_with_screen(caption, st_chg, kick, vk)
                         with STATE_LOCK:
-                            st = load_state()
-                            st["last_change_sent_ts"] = current_ts
-                            save_state(st)
+                            st_update = load_state()
+                            st_update["last_change_sent_ts"] = current_ts
+                            save_state(st_update)
                         log_line("SENT: Title/category change notification")
                     except Exception as e:
                         log_line(f"Change send error: {e}")
         
-        # ===== SCENARIO 4 (ПЕРЕРАБОТАН): STREAM END с переходным периодом =====
-        # Новая логика: если any_live=False, но раньше был True,
-        # сначала считаем transition_streak, и только после его превышения
-        # начинаем считать end_streak
+        # ===== SCENARIO 4: STREAM END с переходным периодом =====
+        # Проверяем, есть ли активная сессия (реально шел стрим)
+        has_active_session = bool(st.get("started_at"))
         
-        if not any_live and prev_any:
-            # Проверяем, не прошло ли меньше TRANSITION_GRACE_PERIOD_SEC с последнего any_live
+        if not any_live and prev_any and has_active_session:
+            # Стрим только что выключился (был True, стал False) и была активная сессия
             time_since_live = current_ts - prev_last_any_live_ts if prev_last_any_live_ts else 999999
             
             if time_since_live < TRANSITION_GRACE_PERIOD_SEC:
                 # Переходный период: стрим мог просто переключиться между площадками
                 new_transition = prev_transition_streak + 1
                 log_line(f">>> TRANSITION MODE: streak={new_transition}/{TRANSITION_STREAK_THRESHOLD}, "
-                         f"time_since_live={time_since_live}s < {TRANSITION_GRACE_PERIOD_SEC}s")
+                         f"time_since_live={time_since_live}s < {TRANSITION_GRACE_PERIOD_SEC}s (has_session=True)")
                 
                 if new_transition >= TRANSITION_STREAK_THRESHOLD:
                     # Переходный период превышен — начинаем считать как потенциальный конец
-                    log_line(f">>> TRANSITION THRESHOLD REACHED, starting end_streak counting")
+                    log_line(f">>> TRANSITION THRESHOLD REACHED, starting end_streak counting (has_session=True)")
                     with STATE_LOCK:
-                        st = load_state()
-                        st["end_streak"] = 1  # Начинаем считать конец
-                        st["transition_streak"] = new_transition
-                        save_state(st)
+                        st_end = load_state()
+                        st_end["end_streak"] = prev_end_streak + 1
+                        st_end["transition_streak"] = new_transition
+                        save_state(st_end)
                 else:
                     # Всё ещё в переходном периоде, не считаем конец
-                    log_line(f">>> Still in transition, NOT counting as end")
+                    log_line(f">>> Still in transition, NOT counting as end (has_session=True)")
                     with STATE_LOCK:
-                        st = load_state()
-                        st["transition_streak"] = new_transition
+                        st_end = load_state()
+                        st_end["transition_streak"] = new_transition
                         # НЕ увеличиваем end_streak
-                        save_state(st)
+                        save_state(st_end)
             else:
                 # Прошло больше TRANSITION_GRACE_PERIOD_SEC — это реальный конец
-                log_line(f">>> BEYOND GRACE PERIOD: {time_since_live}s >= {TRANSITION_GRACE_PERIOD_SEC}s, counting end")
+                log_line(f">>> BEYOND GRACE PERIOD: {time_since_live}s >= {TRANSITION_GRACE_PERIOD_SEC}s, counting end (has_session=True)")
                 with STATE_LOCK:
-                    st = load_state()
-                    st["end_streak"] = prev_end_streak + 1
-                    st["transition_streak"] = prev_transition_streak + 1
-                    save_state(st)
-        elif not any_live and not prev_any:
-            # Уже был offline — продолжаем считать конец
-            log_line(f">>> CONTINUING OFFLINE: end_streak={prev_end_streak + 1}")
+                    st_end = load_state()
+                    st_end["end_streak"] = prev_end_streak + 1
+                    st_end["transition_streak"] = prev_transition_streak + 1
+                    save_state(st_end)
+        elif not any_live and not prev_any and has_active_session:
+            # Уже был offline и есть активная сессия — продолжаем считать конец
+            log_line(f">>> CONTINUING OFFLINE: end_streak={prev_end_streak + 1} (has_session=True)")
             with STATE_LOCK:
-                st = load_state()
-                st["end_streak"] = prev_end_streak + 1
-                save_state(st)
-        else:
-            # any_live=True — сбрасываем все счетчики
+                st_end = load_state()
+                st_end["end_streak"] = prev_end_streak + 1
+                save_state(st_end)
+        elif not any_live and not has_active_session:
+            # Стрима нет и сессии нет — НЕ считаем end_streak
+            log_line(f">>> NO ACTIVE SESSION: NOT counting end_streak (prev_end_streak={prev_end_streak})")
+            # Оставляем end_streak как есть, не увеличиваем
+        elif any_live:
+            # Стрим идет — сбрасываем все счетчики
             if prev_transition_streak > 0 or prev_end_streak > 0:
                 log_line(f">>> LIVE AGAIN: resetting all streaks (was trans={prev_transition_streak}, end={prev_end_streak})")
         
@@ -1904,10 +1904,10 @@ def main_loop():
             cur_started = st_chk.get("started_at")
             already_for = st_chk.get("end_sent_for_started_at")
             cur_end_streak = int(st_chk.get("end_streak") or 0)
-            confirmed_off = (not any_live) and (cur_end_streak >= END_CONFIRM_STREAK)
-            if confirmed_off and cur_started and (already_for != cur_started):
+            confirmed_off = (not any_live) and (cur_end_streak >= END_CONFIRM_STREAK) and bool(cur_started)
+            if confirmed_off and (already_for != cur_started):
                 should_send_end = True
-                log_line(f">>> STREAM END CONFIRMED (end_streak: {cur_end_streak}/{END_CONFIRM_STREAK}) <<<")
+                log_line(f">>> STREAM END CONFIRMED (end_streak: {cur_end_streak}/{END_CONFIRM_STREAK}, session={cur_started}) <<<")
         
         if should_send_end:
             try:
@@ -1942,10 +1942,12 @@ def main_loop():
             if any_live:
                 set_started_at_from_kick(st, kick)
                 st["end_streak"] = 0
-                st["transition_streak"] = 0  # Сброс переходного счетчика
-                st["last_any_live_ts"] = current_ts  # Обновляем время последнего any_live
-            # Если не any_live, end_streak и transition_streak уже обновлены выше
-            # Не перезаписываем их здесь
+                st["transition_streak"] = 0
+                st["last_any_live_ts"] = current_ts
+            elif not st.get("started_at"):
+                # Нет активной сессии — гарантируем нулевые счетчики
+                st["end_streak"] = 0
+                st["transition_streak"] = 0
             
             st["kick_title"] = kick.get("title")
             st["kick_cat"] = kick.get("category")
