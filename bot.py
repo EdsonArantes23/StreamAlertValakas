@@ -92,7 +92,7 @@ FFMPEG_SCALE = os.getenv("FFMPEG_SCALE", "1280:-1").strip()
 MAX_TITLE_LEN = int(os.getenv("MAX_TITLE_LEN", "180"))
 MAX_GAME_LEN = int(os.getenv("MAX_GAME_LEN", "120"))
 
-END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "20"))
+END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "30"))
 
 NOTIFY_409_EVERY_SEC = 6 * 60 * 60
 
