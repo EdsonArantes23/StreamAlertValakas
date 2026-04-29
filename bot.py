@@ -469,12 +469,23 @@ def parse_kick_created_at(s: str | None) -> datetime | None:
         return None
 
 def reset_stream_session(st: dict) -> None:
+    """Полный сброс всех полей, связанных с текущим стримом"""
     st["stream_stats"] = None
     st["end_streak"] = 0
     st["end_sent_for_started_at"] = None
     st["end_sent_ts"] = 0
     st["transition_streak"] = 0
     st["last_any_live_ts"] = 0
+    # ДОБАВЛЕНО: полный сброс всех данных о контенте стрима
+    st["kick_title"] = None
+    st["kick_cat"] = None
+    st["vk_title"] = None
+    st["vk_cat"] = None
+    st["kick_viewers"] = None
+    st["vk_viewers"] = None
+    st["last_change_sent_ts"] = 0
+    st["last_platform_toggle_ts"] = 0
+    st["last_start_sent_ts"] = 0
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
     if not kick.get("live"):
@@ -1338,6 +1349,7 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
     tg_send_main_and_maybe_pubg(caption, st, kick)
 
 def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None) -> None:
+    """Отправка статуса в ответ на команду - НЕ дублирует в PUBG топик"""
     caption = build_caption(prefix, st, kick, vk)
     shot = None
     if kick.get("live"):
@@ -1353,7 +1365,6 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
     
     if shot:
         tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption, filename=f"live_{ts()}.jpg", reply_to=reply_to)
-        maybe_send_to_pubg_topic(caption, st, kick)
         return
     if kick.get("live") and kick.get("thumb"):
         try:
@@ -1361,7 +1372,6 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
             tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
         except Exception:
             tg_send_photo_url_to_cmd(chat_id, thread_id, kick.get("thumb"), caption, reply_to=reply_to)
-        maybe_send_to_pubg_topic(caption, st, kick)
         return
     if vk.get("live") and vk.get("thumb"):
         try:
@@ -1369,10 +1379,8 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
             tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
         except Exception:
             tg_send_photo_url_to_cmd(chat_id, thread_id, vk.get("thumb"), caption, reply_to=reply_to)
-        maybe_send_to_pubg_topic(caption, st, kick)
         return
     tg_send_to_cmd(chat_id, thread_id, caption, reply_to=reply_to)
-    maybe_send_to_pubg_topic(caption, st, kick)
 
 def send_status_with_screen(prefix: str, st: dict, kick: dict, vk: dict) -> None:
     send_status_with_screen_to(prefix, st, kick, vk, GROUP_ID, TOPIC_ID, reply_to=None)
@@ -1636,9 +1644,34 @@ def main_loop():
     
     log_line(f"INIT: Kick live={kick0.get('live')}, VK live={vk0.get('live')}, any_live={any_live0}")
     
-    # Initialize state
+    # Инициализация состояния с проверкой старой сессии
     with STATE_LOCK:
         st = load_state()
+        
+        # ПРОВЕРКА: сброс старой сессии (если started_at слишком старый)
+        started_at_str = st.get("started_at")
+        if started_at_str and not any_live0:
+            try:
+                started_dt = datetime.fromisoformat(started_at_str)
+                age_sec = (now_utc() - started_dt).total_seconds()
+                if age_sec > SESSION_MAX_AGE_SEC:
+                    log_line(f"INIT: Session too old ({fmt_duration(int(age_sec))}), force resetting")
+                    reset_stream_session(st)
+                    st["started_at"] = None
+                    st["any_live"] = False
+                    st["kick_live"] = False
+                    st["vk_live"] = False
+            except Exception:
+                pass
+        elif not any_live0:
+            # Если стрима нет, гарантируем чистоту состояния
+            log_line(f"INIT: No stream, ensuring clean state")
+            reset_stream_session(st)
+            st["started_at"] = None
+            st["any_live"] = False
+            st["kick_live"] = False
+            st["vk_live"] = False
+        
         st["any_live"] = any_live0
         st["kick_live"] = bool(kick0.get("live"))
         st["vk_live"] = bool(vk0.get("live"))
@@ -1743,11 +1776,18 @@ def main_loop():
             if current_ts - last >= START_DEDUP_SEC:
                 with STATE_LOCK:
                     st_start = load_state()
-                    reset_stream_session(st_start)
+                    reset_stream_session(st_start)  # Полный сброс всех полей
                     set_started_at_from_kick(st_start, kick, force=True)
                     st_start["end_streak"] = 0
                     st_start["transition_streak"] = 0
                     st_start["last_any_live_ts"] = current_ts
+                    # ЯВНО устанавливаем текущие данные (а не оставляем None после reset)
+                    st_start["kick_title"] = kick.get("title")
+                    st_start["kick_cat"] = kick.get("category")
+                    st_start["vk_title"] = vk.get("title")
+                    st_start["vk_cat"] = vk.get("category")
+                    st_start["kick_viewers"] = kick.get("viewers")
+                    st_start["vk_viewers"] = vk.get("viewers")
                     save_state(st_start)
                 try:
                     with STATE_LOCK:
@@ -1923,10 +1963,25 @@ def main_loop():
                 tg_send_main_and_maybe_pubg(end_text, st_end, kick)
                 with STATE_LOCK:
                     st_end2 = load_state()
+                    # ПОЛНЫЙ сброс всех стрим-полей после отправки отчета о конце
                     st_end2["started_at"] = None
                     st_end2["end_streak"] = 0
                     st_end2["transition_streak"] = 0
                     st_end2["stream_stats"] = None
+                    st_end2["kick_title"] = None
+                    st_end2["kick_cat"] = None
+                    st_end2["vk_title"] = None
+                    st_end2["vk_cat"] = None
+                    st_end2["kick_viewers"] = None
+                    st_end2["vk_viewers"] = None
+                    st_end2["any_live"] = False
+                    st_end2["kick_live"] = False
+                    st_end2["vk_live"] = False
+                    st_end2["last_any_live_ts"] = 0
+                    st_end2["last_change_sent_ts"] = 0
+                    st_end2["last_platform_toggle_ts"] = 0
+                    st_end2["end_sent_for_started_at"] = None
+                    st_end2["end_sent_ts"] = 0
                     save_state(st_end2)
                 log_line("SENT: Stream end notification with report")
             except Exception as e:
@@ -2016,6 +2071,7 @@ def main():
     log_line(f"[cfg] POLL_INTERVAL={POLL_INTERVAL} COMMAND_POLL_TIMEOUT={COMMAND_POLL_TIMEOUT} COMMAND_HTTP_TIMEOUT={COMMAND_HTTP_TIMEOUT}")
     log_line(f"[cfg] START_DEDUP={START_DEDUP_SEC}s CHANGE_DEDUP={CHANGE_DEDUP_SEC}s TOGGLE_DEDUP={PLATFORM_TOGGLE_DEDUP_SEC}s END_STREAK={END_CONFIRM_STREAK}")
     log_line(f"[cfg] TRANSITION_GRACE_PERIOD={TRANSITION_GRACE_PERIOD_SEC}s TRANSITION_STREAK_THRESHOLD={TRANSITION_STREAK_THRESHOLD}")
+    log_line(f"[cfg] SESSION_MAX_AGE_SEC={SESSION_MAX_AGE_SEC}s")
     cleanup_temp_files()
     cleanup_old_state_backups()
     tg_drop_pending_updates_safe()
