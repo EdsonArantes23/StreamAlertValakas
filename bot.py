@@ -1791,7 +1791,7 @@ def main_loop():
                 with STATE_LOCK:
                     st_start = load_state()
                     
-                    # Сохраняем старую статистику и время старта до сброса
+                    # 1. Сохраняем старую статистику и время старта ДО сброса
                     old_started_at = st_start.get("started_at")
                     old_stats = st_start.get("stream_stats")
                     
@@ -1800,7 +1800,7 @@ def main_loop():
                     
                     new_started_at = st_start.get("started_at")
                     
-                    # Проверяем, тот же ли это стрим
+                    # 2. Проверяем, тот же ли это стрим (время старта совпадает с погрешностью до 60 сек)
                     is_same_stream = False
                     if old_started_at and new_started_at:
                         if str(old_started_at)[:19] == str(new_started_at)[:19]:
@@ -1814,7 +1814,7 @@ def main_loop():
                             except Exception:
                                 pass
                     
-                    # Восстанавливаем статистику, если это тот же стрим
+                    # 3. Если это тот же стрим, восстанавливаем статистику, чтобы не потерять хронологию
                     if is_same_stream and isinstance(old_stats, dict):
                         st_start["stream_stats"] = old_stats
                         st_start["stream_stats"]["session_started_at"] = new_started_at
