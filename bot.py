@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from html import escape as html_escape
 import requests
 
-========== CONFIG (ENV) ==========
+# ========== CONFIG (ENV) ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 def _mask_secrets(text: str) -> str:
