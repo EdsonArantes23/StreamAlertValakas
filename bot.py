@@ -1099,7 +1099,7 @@ def vk_fetch_best_effort() -> dict:
         # METHOD 3: Check for Live badge
         has_live_badge = bool(re.search(r'LiveBadge.*?isLive["\']?\s*:\s*["\']Live["\']', html, re.IGNORECASE))
         
-        # METHOD 4: Check if there's actual stream content
+        # METHOD 4: Check if there's actual stream content (not just cached)
         has_m3u8 = bool(re.search(r'\.m3u8[^"\']*["\']?', html, re.IGNORECASE))
         has_video_player = bool(re.search(r'(video_player|videoplayer|stream_player|player_container)', html, re.IGNORECASE))
         has_viewer_count = bool(re.search(r'(зрител|смотрят|viewers|watchers)', html, re.IGNORECASE))
@@ -1131,23 +1131,17 @@ def vk_fetch_best_effort() -> dict:
                 pass
         
         # Parse title - ИСПРАВЛЕННАЯ ВЕРСИЯ
-        title_match = re.search(r'BlockRenderer_markup_Wtipg[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE)
+        title_match = re.search(r'data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE)
         if not title_match:
-            title_match = re.search(r'(?:ChannelStreamTitle_title|StreamTitle_root).*?<div[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE | re.DOTALL)
+            title_match = re.search(r'StreamTitle[^>]*>.*?data-role=["\']markup["\'][^>]*>([^<]+?)(?:<br\s*/?>)?\s*</div>', html, re.IGNORECASE | re.DOTALL)
         if not title_match:
-            title_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+            title_match = re.search(r'BlockRenderer_markup[^>]*>([^<]+?)(?:<br\s*/?>)?\s*</div>', html, re.IGNORECASE)
+        if not title_match:
+            title_match = re.search(r'<title>([^<]+)</title>', html, re.IGNORECASE)
         if title_match:
             title = title_match.group(1).strip()
-            if title and ("смотреть онлайн" in title.lower() or "трансляции и записи" in title.lower() or "VK Видео Live" in title):
-                alt_match = re.search(r'StreamTitle_root.*?<div[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE | re.DOTALL)
-                if alt_match:
-                    alt_title = alt_match.group(1).strip()
-                    if alt_title and len(alt_title) > 5 and "смотреть" not in alt_title.lower():
-                        title = alt_title
-                    else:
-                        title = None
-                else:
-                    title = None
+            if len(title) > 200:
+                title = None
         
         # Parse category
         cat_match = re.search(r'StreamCategory[^>]*>([^<]+)</a>', html, re.IGNORECASE)
@@ -1707,7 +1701,7 @@ def main_loop():
         
         st["any_live"] = any_live0
         st["kick_live"] = bool(kick0.get("live"))
-        st["vk_live"] = bool(vk0.get("live"))
+        st["vk_live"] = bool(kick0.get("live"))
         
         if any_live0:
             set_started_at_from_kick(st, kick0)
