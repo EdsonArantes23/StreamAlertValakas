@@ -471,7 +471,6 @@ def parse_kick_created_at(s: str | None) -> datetime | None:
         return None
 
 def reset_stream_session(st: dict) -> None:
-    """Полный сброс всех полей, связанных с текущим стримом"""
     st["stream_stats"] = None
     st["end_streak"] = 0
     st["end_sent_for_started_at"] = None
@@ -1781,6 +1780,7 @@ def main_loop():
         vk_live = bool(vk.get("live"))
         current_ts = ts()
         log_line(f"POLL: Kick={kick_live}, VK={vk_live}, any={any_live} | Prev: any={prev_any}, K={prev_kick_live}, VK={prev_vk_live}, streak={prev_end_streak}, trans_streak={prev_transition_streak}, first_poll={is_first_poll}")
+        
         # ===== SCENARIO 1: STREAM START =====
         if (not prev_any) and any_live:
             log_line(f">>> STREAM START DETECTED <<<")
@@ -1844,6 +1844,7 @@ def main_loop():
                     log_line("SENT: Stream start notification")
                 except Exception as e:
                     log_line(f"Start send error: {e}")
+                    
         # ===== SCENARIO 2: PLATFORM TOGGLE =====
         elif any_live and prev_any:
             if is_first_poll:
@@ -1887,6 +1888,7 @@ def main_loop():
                         log_line(f"SENT: Platform toggle notification: {change_desc}")
                     except Exception as e:
                         log_line(f"Platform toggle send error: {e}")
+                        
         # ===== SCENARIO 3: TITLE/CATEGORY CHANGES =====
         if any_live and not is_first_poll:
             kick_title_changed = False
@@ -1920,6 +1922,7 @@ def main_loop():
                         log_line(f"Change send error: {e}")
         elif any_live and is_first_poll:
             log_line(f">>> SKIPPING change detection on first poll")
+            
         # ===== SCENARIO 4: STREAM END с переходным периодом =====
         has_active_session = bool(st.get("started_at"))
         if not any_live and prev_any and has_active_session:
@@ -1958,6 +1961,7 @@ def main_loop():
         elif any_live and not is_first_poll:
             if prev_transition_streak > 0 or prev_end_streak > 0:
                 log_line(f">>> LIVE AGAIN: resetting all streaks (was trans={prev_transition_streak}, end={prev_end_streak})")
+                
         should_send_end = False
         with STATE_LOCK:
             st_chk = load_state()
@@ -1968,6 +1972,7 @@ def main_loop():
             if confirmed_off and (already_for != cur_started):
                 should_send_end = True
                 log_line(f">>> STREAM END CONFIRMED (end_streak: {cur_end_streak}/{END_CONFIRM_STREAK}, session={cur_started}) <<<")
+                
         if should_send_end:
             try:
                 with STATE_LOCK:
@@ -2004,6 +2009,7 @@ def main_loop():
                 log_line("SENT: Stream end notification with report")
             except Exception as e:
                 log_line(f"End send error: {e}")
+                
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = any_live
@@ -2026,10 +2032,12 @@ def main_loop():
             st["is_first_poll"] = False
             stats_tick(st, kick, vk, any_live, now_ts=ts())
             save_state(st)
+            
         try:
             _cache_set_snapshot(st, kick, vk)
         except Exception:
             pass
+            
         cleanup_counter += 1
         if cleanup_counter >= DISK_CHECK_INTERVAL:
             cleanup_temp_files()
