@@ -707,6 +707,7 @@ def load_state() -> dict:
             if not raw.strip():
                 return default_state()
             st = json.loads(raw)
+            # Clean keys just in case
             st = {k.strip(): v for k, v in st.items()}
             important = {"any_live", "kick_live", "vk_live", "started_at", "updates_offset", "last_command_seen_ts", "last_updates_poll_ts", "end_streak", "end_sent_for_started_at", "stream_stats"}
             st = {k: v for k, v in (st or {}).items() if k in important}
@@ -716,6 +717,8 @@ def load_state() -> dict:
             if not raw.strip():
                 return default_state()
             st = json.loads(raw)
+            # Clean keys just in case
+            st = {k.strip(): v for k, v in st.items()}
             if not isinstance(st, dict):
                 return default_state()
     except Exception:
@@ -1131,7 +1134,7 @@ def vk_fetch_best_effort() -> dict:
             except Exception:
                 pass
         
-        # Parse title
+        # Parse title - ИСПРАВЛЕННАЯ ВЕРСИЯ
         title_match = re.search(r'BlockRenderer_markup_Wtipg[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE)
         if not title_match:
             title_match = re.search(r'(?:ChannelStreamTitle_title|StreamTitle_root).*?<div[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE | re.DOTALL)
@@ -1139,6 +1142,7 @@ def vk_fetch_best_effort() -> dict:
             title_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
         if title_match:
             title = title_match.group(1).strip()
+            # Filter out generic titles
             if title and ("смотреть онлайн" in title.lower() or "трансляции и записи" in title.lower() or "VK Видео Live" in title):
                 alt_match = re.search(r'StreamTitle_root.*?<div[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE | re.DOTALL)
                 if alt_match:
@@ -1816,29 +1820,29 @@ def main_loop():
             if current_ts - last >= START_DEDUP_SEC:
                 with STATE_LOCK:
                     st_start = load_state()
-                    
-                    # === ИСПРАВЛЕНИЕ ОТЧЁТА ===
-                    # Проверяем, тот же ли это стрим, чтобы не терять статистику
+                    # ПРОВЕРКА: та же ли это сессия, чтобы сохранить историю для отчета
                     kick_dt = parse_kick_created_at(kick.get("created_at"))
                     stored_dt = dt_from_iso(st_start.get("started_at"))
                     is_same_session = False
                     if kick_dt and stored_dt:
-                        diff_sec = abs((kick_dt - stored_dt).total_seconds())
-                        if diff_sec <= RECONNECT_WINDOW_SEC:
+                        diff = abs((kick_dt - stored_dt).total_seconds())
+                        if diff <= RECONNECT_WINDOW_SEC:
                             is_same_session = True
 
                     if is_same_session:
-                        log_line(f"Stream restart detected for same session (diff={diff_sec:.0f}s). Preserving stream_stats.")
+                        # Это продолжение того же стрима -> СОХРАНЯЕМ stream_stats
+                        log_line(f"Stream start detected for SAME session (diff={diff:.0f}s). Keeping stats.")
                         st_start["end_streak"] = 0
                         st_start["transition_streak"] = 0
+                        # Не сбрасываем kick_title, cat, viewers, чтобы не прерывать логику
                         st_start["kick_title"] = kick.get("title")
                         st_start["kick_cat"] = kick.get("category")
                         st_start["vk_title"] = vk.get("title")
                         st_start["vk_cat"] = vk.get("category")
                         st_start["kick_viewers"] = kick.get("viewers")
                         st_start["vk_viewers"] = vk.get("viewers")
-                        st_start["is_first_poll"] = False
                     else:
+                        # Новая сессия -> СБРАСЫВАЕМ всё
                         log_line("New stream session detected. Resetting stats.")
                         reset_stream_session(st_start)
                         set_started_at_from_kick(st_start, kick, force=True)
@@ -1850,10 +1854,9 @@ def main_loop():
                         st_start["vk_cat"] = vk.get("category")
                         st_start["kick_viewers"] = kick.get("viewers")
                         st_start["vk_viewers"] = vk.get("viewers")
-                        st_start["is_first_poll"] = False
-                    # ==========================
 
                     st_start["last_any_live_ts"] = current_ts
+                    st_start["is_first_poll"] = False
                     save_state(st_start)
                 try:
                     with STATE_LOCK:
