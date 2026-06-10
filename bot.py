@@ -707,7 +707,6 @@ def load_state() -> dict:
             if not raw.strip():
                 return default_state()
             st = json.loads(raw)
-            # Clean keys just in case
             st = {k.strip(): v for k, v in st.items()}
             important = {"any_live", "kick_live", "vk_live", "started_at", "updates_offset", "last_command_seen_ts", "last_updates_poll_ts", "end_streak", "end_sent_for_started_at", "stream_stats"}
             st = {k: v for k, v in (st or {}).items() if k in important}
@@ -717,7 +716,6 @@ def load_state() -> dict:
             if not raw.strip():
                 return default_state()
             st = json.loads(raw)
-            # Clean keys just in case
             st = {k.strip(): v for k, v in st.items()}
             if not isinstance(st, dict):
                 return default_state()
