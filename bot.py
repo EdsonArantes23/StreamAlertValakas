@@ -1075,6 +1075,31 @@ def kick_fetch() -> dict:
         log_line(f"Kick fetch error: {e}")
         return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
 
+def _parse_vk_initial_state(html: str) -> dict | None:
+    m = re.search(r"<script[^>]*id=['\"]initial-state['\"][^>]*>(.*?)</script>", html, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except Exception:
+        return None
+
+def _vk_extract_stream_from_state(state: dict) -> dict | None:
+    try:
+        return state["stream"]["stream"]["data"]["stream"]
+    except (KeyError, TypeError):
+        return None
+
+def _vk_pick_hls_url(stream_obj: dict) -> str | None:
+    try:
+        for source in stream_obj.get("data") or []:
+            for pu in source.get("playerUrls") or []:
+                if pu.get("type") in ("live_hls", "live_playback_hls") and pu.get("url"):
+                    return pu["url"]
+    except Exception:
+        pass
+    return None
+
 def vk_fetch_best_effort() -> dict:
     headers = dict(HEADERS_HTML)
     headers.update({
@@ -1084,154 +1109,121 @@ def vk_fetch_best_effort() -> dict:
         "Cache-Control": "no-cache",
         "Pragma": "no-cache"
     })
+    OFFLINE = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
     try:
         url = bust(VK_PUBLIC_URL) or VK_PUBLIC_URL
         r = http_request_ext("GET", url, headers=headers, timeout=25, allow_redirects=True)
         html = r.text
-        
         log_line(f"VK Play page size: {len(html)} bytes")
-        
-        # METHOD 1: Check isOnline in JSON data
-        stream_json_matches = re.findall(r'"isOnline"\s*:\s*(true|false)', html, re.IGNORECASE)
-        
-        found_online = False
-        for match in stream_json_matches:
-            if match.lower() == 'true':
-                found_online = True
-                log_line(f"VK Play: Found isOnline=true in JSON - stream IS LIVE")
-                break
-        
-        # METHOD 2: Check isLiveBroadcast in JSON-LD (most reliable signal)
-        is_live_broadcast = bool(re.search(r'"isLiveBroadcast"\s*:\s*"true"', html, re.IGNORECASE))
-        if is_live_broadcast:
-            found_online = True
-            log_line("VK Play: Found isLiveBroadcast=true in JSON-LD")
-        
-        # METHOD 3: Check body class for 'live'
-        body_live = bool(re.search(r'<body[^>]*class="[^"]*\blive\b', html, re.IGNORECASE))
-        if body_live:
-            found_online = True
-            log_line("VK Play: Found 'live' in body class")
-        
-        if not found_online and stream_json_matches:
-            log_line(f"VK Play: No isOnline=true found (all were false), checking other indicators")
-        
-        # METHOD 4: Check for explicit offline indicators
-        offline_indicators = [
-            r'streamEnded["\']?\s*:\s*["\']Трансляция завершена["\']',
-            r'streamEnded["\']?\s*:\s*["\']Трансляция окончена["\']',
-            r'offline["\']?\s*:\s*["\']Стример не в сети["\']',
-            r'streamOffline["\']?\s*:\s*["\']Трансляция приостановлена["\']',
-        ]
-        
-        for pattern in offline_indicators:
-            if re.search(pattern, html, re.IGNORECASE):
-                if not found_online:
-                    log_line(f"VK Play: Found offline text indicator")
-                    return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
-        
-        # METHOD 5: Check for Live badge
-        has_live_badge = bool(re.search(r'LiveBadge.*?isLive["\']?\s*:\s*["\']Live["\']', html, re.IGNORECASE))
-        
-        # METHOD 6: Check if there's actual stream content
-        has_m3u8 = bool(re.search(r'\.m3u8[^"\']*["\']?', html, re.IGNORECASE))
-        has_video_player = bool(re.search(r'(video_player|videoplayer|stream_player|player_container)', html, re.IGNORECASE))
-        has_viewer_count = bool(re.search(r'(зрител|смотрят|viewers|watchers)', html, re.IGNORECASE))
-        
-        is_live = found_online or is_live_broadcast or body_live or has_live_badge or (has_m3u8 and has_video_player)
-        
-        log_line(f"VK Play: isOnline={found_online}, LiveBroadcast={is_live_broadcast}, bodyLive={body_live}, LiveBadge={has_live_badge}, M3U8={has_m3u8}, Player={has_video_player}, Viewers={has_viewer_count}, isLive={is_live}")
-        
-        if not is_live:
-            log_line(f"VK Play: No live indicators found, returning offline")
-            return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
-        
-        # Parse stream data only if live
-        viewers = None
-        title = None
+
+        state = _parse_vk_initial_state(html)
+        if state is None:
+            log_line("VK Play: initial-state JSON not found, falling back to HTML regex")
+            return _vk_fetch_fallback_html(html)
+
+        stream_obj = _vk_extract_stream_from_state(state)
+        if stream_obj is None:
+            log_line("VK Play: stream object missing in initial-state")
+            return dict(OFFLINE)
+
+        is_online = bool(stream_obj.get("isOnline"))
+        if not is_online:
+            log_line("VK Play: isOnline=false")
+            return dict(OFFLINE)
+
+        title_raw = stream_obj.get("title")
+        title = _clean_stream_title(title_raw) if title_raw else None
+
         category = None
-        thumb = None
-        
-        # Parse viewers - try multiple patterns
-        viewers_matches = re.findall(r'ViewersCounter_isLive[^>]*>.*?<div>(\d+)</div>', html, re.IGNORECASE | re.DOTALL)
-        if not viewers_matches:
-            viewers_matches = re.findall(r'"viewers"?\s*:\s*(\d+)', html, re.IGNORECASE)
-        if not viewers_matches:
-            viewers_matches = re.findall(r'"viewerCount"?\s*:\s*(\d+)', html, re.IGNORECASE)
-        if not viewers_matches:
-            viewers_matches = re.findall(r'(\d+)\s*(?:зрител|смотрят)', html, re.IGNORECASE)
-        if viewers_matches:
+        cat_obj = stream_obj.get("category")
+        if isinstance(cat_obj, dict):
+            category = cat_obj.get("title")
+        elif isinstance(cat_obj, str):
+            category = cat_obj
+
+        viewers = None
+        count_obj = stream_obj.get("count")
+        if isinstance(count_obj, dict):
+            v = count_obj.get("viewers")
+            if isinstance(v, (int, float)):
+                viewers = int(v)
+
+        thumb = stream_obj.get("channelCoverImageUrl") or stream_obj.get("previewUrl") or None
+        if not thumb:
             try:
-                viewers = int(viewers_matches[-1])
+                thumb = state.get("stream", {}).get("stream", {}).get("data", {}).get("stream", {}).get("user", {}).get("avatarUrl")
             except Exception:
                 pass
-        
-        # Parse title - try multiple patterns
-        title_match = re.search(r'BlockRenderer_markup_Wtipg[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE)
-        if not title_match:
-            title_match = re.search(r'(?:ChannelStreamTitle_title|StreamTitle_root).*?<div[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE | re.DOTALL)
-        if not title_match:
-            title_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        if not title_match:
-            title_match = re.search(r'"title"\s*:\s*"([^"]{5,})"', html, re.IGNORECASE)
-        if title_match:
-            title = title_match.group(1).strip()
-            if title and ("смотреть онлайн" in title.lower() or "трансляции и записи" in title.lower() or "VK Видео Live" in title):
-                alt_match = re.search(r'StreamTitle_root.*?<div[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE | re.DOTALL)
-                if alt_match:
-                    alt_title = alt_match.group(1).strip()
-                    if alt_title and len(alt_title) > 5 and "смотреть" not in alt_title.lower():
-                        title = alt_title
-                    else:
-                        title = None
-                else:
-                    title = None
-        
-        # Parse category - try multiple patterns
-        cat_match = re.search(r'StreamCategory[^>]*>([^<]+)</a>', html, re.IGNORECASE)
-        if not cat_match:
-            cat_match = re.search(r'StreamTag[^>]*>.*?href=["\']/app/category/[^"\']+["\'][^>]*>([^<]+)<', html, re.IGNORECASE | re.DOTALL)
-        if not cat_match:
-            cat_match = re.search(r'"category"?\s*:\s*"([^"]+)"', html, re.IGNORECASE)
-        if not cat_match:
-            cat_match = re.search(r'"category"\s*:\s*\{[^}]*"label"\s*:\s*"([^"]+)"', html, re.IGNORECASE)
-        if cat_match:
-            category = cat_match.group(1).strip()
-        
-        # Get thumbnail
-        thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-        if not thumb_match:
-            thumb_match = re.search(r'"thumbnail"?\s*:\s*"([^"]+)"', html, re.IGNORECASE)
-        if not thumb_match:
-            thumb_match = re.search(r'"coverUrl"\s*:\s*"([^"]+)"', html, re.IGNORECASE)
-        if thumb_match:
-            thumb = thumb_match.group(1)
-        
-        # Clean title
-        if title:
-            title = _clean_stream_title(title)
-        
-        # Extract HLS playback URL for screenshots
-        playback_url = None
-        hls_urls = _extract_vk_hls_urls(html)
-        if hls_urls:
-            playback_url = hls_urls[0]
-            log_line(f"VK Play: Extracted HLS playback URL for screenshots")
-        
-        log_line(f"VK Play final: live=True, title='{title}', cat='{category}', viewers={viewers}, has_hls={bool(playback_url)}")
-        
+
+        playback_url = _vk_pick_hls_url(stream_obj)
+
+        log_line(f"VK Play: live=True, title='{title}', cat='{category}', viewers={viewers}, has_hls={bool(playback_url)}")
         return {
-             "live": True,
-             "title": trim(title, MAX_TITLE_LEN) if title else None,
-             "category": trim(category, MAX_GAME_LEN) if category else None,
-             "viewers": viewers,
-             "thumb": thumb,
-             "playback_url": playback_url
+            "live": True,
+            "title": trim(title, MAX_TITLE_LEN) if title else None,
+            "category": trim(category, MAX_GAME_LEN) if category else None,
+            "viewers": viewers,
+            "thumb": thumb,
+            "playback_url": playback_url,
         }
-        
+
     except Exception as e:
-        log_line(f"VK fetch HTTP error: {e}")
+        log_line(f"VK fetch error: {e}")
         return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
+
+def _vk_fetch_fallback_html(html: str) -> dict:
+    OFFLINE = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
+    is_live_broadcast = bool(re.search(r'"isLiveBroadcast"\s*:\s*"true"', html, re.IGNORECASE))
+    body_live = bool(re.search(r'<body[^>]*class="[^"]*\blive\b', html, re.IGNORECASE))
+    if not is_live_broadcast and not body_live:
+        log_line("VK Play fallback: no live indicators in HTML")
+        return dict(OFFLINE)
+
+    viewers = None
+    m = re.search(r'"viewers"?\s*:\s*(\d+)', html, re.IGNORECASE)
+    if m:
+        try:
+            viewers = int(m.group(1))
+        except Exception:
+            pass
+
+    title = None
+    m = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    if m:
+        desc = m.group(1).strip()
+        mm = re.search(r'стримит\s+(.+?)\s+на\s+VK', desc)
+        if mm:
+            title = mm.group(1).strip()
+
+    category = None
+    m = re.search(r'"category"?\s*:\s*\{[^}]*"title"\s*:\s*"([^"]+)"', html, re.IGNORECASE)
+    if not m:
+        m = re.search(r'"category"?\s*:\s*"([^"]+)"', html, re.IGNORECASE)
+    if m:
+        category = m.group(1).strip()
+
+    thumb = None
+    m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    if m:
+        thumb = m.group(1)
+
+    playback_url = None
+    hls_urls = _extract_vk_hls_urls(html)
+    if hls_urls:
+        playback_url = hls_urls[0]
+
+    if title:
+        title = _clean_stream_title(title)
+
+    log_line(f"VK Play fallback: live=True, title='{title}', cat='{category}', viewers={viewers}")
+    return {
+        "live": True,
+        "title": trim(title, MAX_TITLE_LEN) if title else None,
+        "category": trim(category, MAX_GAME_LEN) if category else None,
+        "viewers": viewers,
+        "thumb": thumb,
+        "playback_url": playback_url,
+    }
 
 def build_caption(prefix: str, st: dict, kick: dict, vk: dict) -> str:
     running = fmt_running_line(st)
