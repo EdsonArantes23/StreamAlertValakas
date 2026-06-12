@@ -848,7 +848,10 @@ def tg_send_chat_action(chat_id: int, thread_id: int | None, action: str) -> Non
 def get_platform_keyboard() -> dict:
     return {
         "inline_keyboard": [
-            [{"text": "🎥 Kick", "url": KICK_PUBLIC_URL}, {"text": "🎮 VK Play", "url": VK_PUBLIC_URL}]
+            [
+                {"text": "🎥 Kick", "url": KICK_PUBLIC_URL, "color": "green"},
+                {"text": "🎮 VK Play", "url": VK_PUBLIC_URL, "color": "cyan"}
+            ]
         ]
     }
 
@@ -1001,28 +1004,45 @@ def screenshot_from_m3u8_fresh(playback_url: str) -> bytes | None:
     except Exception:
         return None
 
+def _extract_vk_hls_urls(html: str) -> list[str]:
+    hls_patterns = [
+        r'(https?:\\/\\/[^"\s]+\.m3u8[^"\s]*)',
+        r'(https?://[^"\s]+\.m3u8[^"\s]*)',
+        r'"hls_url"\s*:\s*"([^"]+)"',
+        r'"playback_url"\s*:\s*"([^"]+)"',
+        r'"src"\s*:\s*"(https?://[^"]+\.m3u8[^"]*)"',
+    ]
+    urls = []
+    seen = set()
+    for pattern in hls_patterns:
+        for match in re.findall(pattern, html, re.IGNORECASE):
+            url = match.replace('\\/', '/').replace('\\u0026', '&')
+            if url in seen:
+                continue
+            seen.add(url)
+            if '/cmaf/' in url:
+                continue
+            urls.append(url)
+    return urls
+
 def screenshot_from_vk_page(page_url: str) -> bytes | None:
     if not FFMPEG_ENABLED or not page_url or not ffmpeg_available():
         return None
     try:
         headers = dict(HEADERS_HTML)
         headers.update({"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"})
-        r = http_request_ext("GET", page_url, headers=headers, timeout=15)
+        r = http_request_ext("GET", page_url, headers=headers, timeout=20)
         html = r.text
-        hls_patterns = [
-            r'(https?://[^"\s]+\.m3u8[^"\s]*)',
-            r'"hls_url"\s*:\s*"([^"]+)"',
-            r'"playback_url"\s*:\s*"([^"]+)"',
-            r'stream_url["\']?\s*:\s*["\']([^"\']+\.m3u8[^"\']*)',
-        ]
-        playback_url = None
-        for pattern in hls_patterns:
-            match = re.search(pattern, html, re.IGNORECASE)
-            if match:
-                playback_url = match.group(1)
-                break
-        if playback_url:
-            return screenshot_from_m3u8_fast(playback_url)
+        urls = _extract_vk_hls_urls(html)
+        if not urls:
+            log_line("VK Play: No HLS URLs found for screenshot")
+            return None
+        log_line(f"VK Play: Found {len(urls)} HLS URLs for screenshot")
+        for url in urls:
+            shot = screenshot_from_m3u8_fast(url)
+            if shot:
+                return shot
+        log_line("VK Play: All HLS URLs failed for screenshot")
     except Exception as e:
         log_line(f"VK screenshot extraction error: {e}")
     return None
@@ -1071,7 +1091,7 @@ def vk_fetch_best_effort() -> dict:
         
         log_line(f"VK Play page size: {len(html)} bytes")
         
-        # METHOD 1: Check isOnline in JSON data - MOST RELIABLE
+        # METHOD 1: Check isOnline in JSON data
         stream_json_matches = re.findall(r'"isOnline"\s*:\s*(true|false)', html, re.IGNORECASE)
         
         found_online = False
@@ -1080,11 +1100,23 @@ def vk_fetch_best_effort() -> dict:
                 found_online = True
                 log_line(f"VK Play: Found isOnline=true in JSON - stream IS LIVE")
                 break
-            elif match.lower() == 'false':
-                log_line(f"VK Play: Found isOnline=false in JSON - stream is OFFLINE")
-                return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
         
-        # METHOD 2: Check for explicit offline indicators
+        # METHOD 2: Check isLiveBroadcast in JSON-LD (most reliable signal)
+        is_live_broadcast = bool(re.search(r'"isLiveBroadcast"\s*:\s*"true"', html, re.IGNORECASE))
+        if is_live_broadcast:
+            found_online = True
+            log_line("VK Play: Found isLiveBroadcast=true in JSON-LD")
+        
+        # METHOD 3: Check body class for 'live'
+        body_live = bool(re.search(r'<body[^>]*class="[^"]*\blive\b', html, re.IGNORECASE))
+        if body_live:
+            found_online = True
+            log_line("VK Play: Found 'live' in body class")
+        
+        if not found_online and stream_json_matches:
+            log_line(f"VK Play: No isOnline=true found (all were false), checking other indicators")
+        
+        # METHOD 4: Check for explicit offline indicators
         offline_indicators = [
             r'streamEnded["\']?\s*:\s*["\']Трансляция завершена["\']',
             r'streamEnded["\']?\s*:\s*["\']Трансляция окончена["\']',
@@ -1096,23 +1128,23 @@ def vk_fetch_best_effort() -> dict:
             if re.search(pattern, html, re.IGNORECASE):
                 if not found_online:
                     log_line(f"VK Play: Found offline text indicator")
-                    return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
+                    return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
         
-        # METHOD 3: Check for Live badge
+        # METHOD 5: Check for Live badge
         has_live_badge = bool(re.search(r'LiveBadge.*?isLive["\']?\s*:\s*["\']Live["\']', html, re.IGNORECASE))
         
-        # METHOD 4: Check if there's actual stream content
+        # METHOD 6: Check if there's actual stream content
         has_m3u8 = bool(re.search(r'\.m3u8[^"\']*["\']?', html, re.IGNORECASE))
         has_video_player = bool(re.search(r'(video_player|videoplayer|stream_player|player_container)', html, re.IGNORECASE))
         has_viewer_count = bool(re.search(r'(зрител|смотрят|viewers|watchers)', html, re.IGNORECASE))
         
-        is_live = found_online or has_live_badge or (has_m3u8 and has_video_player)
+        is_live = found_online or is_live_broadcast or body_live or has_live_badge or (has_m3u8 and has_video_player)
         
-        log_line(f"VK Play: isOnline={found_online}, LiveBadge={has_live_badge}, M3U8={has_m3u8}, Player={has_video_player}, Viewers={has_viewer_count}, isLive={is_live}")
+        log_line(f"VK Play: isOnline={found_online}, LiveBroadcast={is_live_broadcast}, bodyLive={body_live}, LiveBadge={has_live_badge}, M3U8={has_m3u8}, Player={has_video_player}, Viewers={has_viewer_count}, isLive={is_live}")
         
         if not is_live:
             log_line(f"VK Play: No live indicators found, returning offline")
-            return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
+            return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
         
         # Parse stream data only if live
         viewers = None
@@ -1120,27 +1152,30 @@ def vk_fetch_best_effort() -> dict:
         category = None
         thumb = None
         
-        # Parse viewers
+        # Parse viewers - try multiple patterns
         viewers_matches = re.findall(r'ViewersCounter_isLive[^>]*>.*?<div>(\d+)</div>', html, re.IGNORECASE | re.DOTALL)
         if not viewers_matches:
             viewers_matches = re.findall(r'"viewers"?\s*:\s*(\d+)', html, re.IGNORECASE)
         if not viewers_matches:
             viewers_matches = re.findall(r'"viewerCount"?\s*:\s*(\d+)', html, re.IGNORECASE)
+        if not viewers_matches:
+            viewers_matches = re.findall(r'(\d+)\s*(?:зрител|смотрят)', html, re.IGNORECASE)
         if viewers_matches:
             try:
                 viewers = int(viewers_matches[-1])
             except Exception:
                 pass
         
-        # Parse title - ИСПРАВЛЕННАЯ ВЕРСИЯ
+        # Parse title - try multiple patterns
         title_match = re.search(r'BlockRenderer_markup_Wtipg[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE)
         if not title_match:
             title_match = re.search(r'(?:ChannelStreamTitle_title|StreamTitle_root).*?<div[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE | re.DOTALL)
         if not title_match:
             title_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if not title_match:
+            title_match = re.search(r'"title"\s*:\s*"([^"]{5,})"', html, re.IGNORECASE)
         if title_match:
             title = title_match.group(1).strip()
-            # Filter out generic titles
             if title and ("смотреть онлайн" in title.lower() or "трансляции и записи" in title.lower() or "VK Видео Live" in title):
                 alt_match = re.search(r'StreamTitle_root.*?<div[^>]*data-role=["\']markup["\'][^>]*>([^<]+)', html, re.IGNORECASE | re.DOTALL)
                 if alt_match:
@@ -1152,12 +1187,14 @@ def vk_fetch_best_effort() -> dict:
                 else:
                     title = None
         
-        # Parse category
+        # Parse category - try multiple patterns
         cat_match = re.search(r'StreamCategory[^>]*>([^<]+)</a>', html, re.IGNORECASE)
         if not cat_match:
             cat_match = re.search(r'StreamTag[^>]*>.*?href=["\']/app/category/[^"\']+["\'][^>]*>([^<]+)<', html, re.IGNORECASE | re.DOTALL)
         if not cat_match:
             cat_match = re.search(r'"category"?\s*:\s*"([^"]+)"', html, re.IGNORECASE)
+        if not cat_match:
+            cat_match = re.search(r'"category"\s*:\s*\{[^}]*"label"\s*:\s*"([^"]+)"', html, re.IGNORECASE)
         if cat_match:
             category = cat_match.group(1).strip()
         
@@ -1165,6 +1202,8 @@ def vk_fetch_best_effort() -> dict:
         thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
         if not thumb_match:
             thumb_match = re.search(r'"thumbnail"?\s*:\s*"([^"]+)"', html, re.IGNORECASE)
+        if not thumb_match:
+            thumb_match = re.search(r'"coverUrl"\s*:\s*"([^"]+)"', html, re.IGNORECASE)
         if thumb_match:
             thumb = thumb_match.group(1)
         
@@ -1172,19 +1211,27 @@ def vk_fetch_best_effort() -> dict:
         if title:
             title = _clean_stream_title(title)
         
-        log_line(f"VK Play final: live=True, title='{title}', cat='{category}', viewers={viewers}")
+        # Extract HLS playback URL for screenshots
+        playback_url = None
+        hls_urls = _extract_vk_hls_urls(html)
+        if hls_urls:
+            playback_url = hls_urls[0]
+            log_line(f"VK Play: Extracted HLS playback URL for screenshots")
+        
+        log_line(f"VK Play final: live=True, title='{title}', cat='{category}', viewers={viewers}, has_hls={bool(playback_url)}")
         
         return {
              "live": True,
              "title": trim(title, MAX_TITLE_LEN) if title else None,
              "category": trim(category, MAX_GAME_LEN) if category else None,
              "viewers": viewers,
-             "thumb": thumb
+             "thumb": thumb,
+             "playback_url": playback_url
         }
         
     except Exception as e:
         log_line(f"VK fetch HTTP error: {e}")
-        return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
+        return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
 
 def build_caption(prefix: str, st: dict, kick: dict, vk: dict) -> str:
     running = fmt_running_line(st)
@@ -1243,7 +1290,11 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
                 shot = screenshot_from_m3u8(playback_url)
 
     if not shot and vk.get("live"):
-        shot = screenshot_from_vk_page(VK_PUBLIC_URL)
+        vk_playback = vk.get("playback_url")
+        if vk_playback:
+            shot = screenshot_from_m3u8_fast(vk_playback)
+        if not shot:
+            shot = screenshot_from_vk_page(VK_PUBLIC_URL)
 
     if shot:
         tg_send_photo_upload_to(chat_id, thread_id, shot, caption, filename=f"live_{ts()}.jpg", reply_to=reply_to)
@@ -1340,7 +1391,11 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict) -> No
         if playback_url:
             shot = screenshot_from_m3u8_fresh(playback_url)
     if not shot and vk.get("live"):
-        shot = screenshot_from_vk_page(VK_PUBLIC_URL)
+        vk_playback = vk.get("playback_url")
+        if vk_playback:
+            shot = screenshot_from_m3u8_fresh(vk_playback)
+        if not shot:
+            shot = screenshot_from_vk_page(VK_PUBLIC_URL)
     if shot:
         try:
             tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, shot, caption, filename=f"change_{ts()}.jpg", reply_to=None)
@@ -1375,7 +1430,11 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
         if cached:
             shot, _age = cached
     if not shot and vk.get("live"):
-        shot = screenshot_from_vk_page(VK_PUBLIC_URL)
+        vk_playback = vk.get("playback_url")
+        if vk_playback:
+            shot = screenshot_from_m3u8_fresh(vk_playback)
+        if not shot:
+            shot = screenshot_from_vk_page(VK_PUBLIC_URL)
     if shot:
         tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption, filename=f"live_{ts()}.jpg", reply_to=reply_to)
         return
@@ -1591,7 +1650,7 @@ def commands_loop_once():
                 try:
                     vk = vk_fetch_best_effort()
                 except Exception as e:
-                    vk = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
+                    vk = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "playback_url": None}
                     log_line(f"VK fetch (command) error: {e}")
             with STATE_LOCK:
                 st_cur = load_state()
@@ -1710,7 +1769,7 @@ def main_loop():
         
         st["any_live"] = any_live0
         st["kick_live"] = bool(kick0.get("live"))
-        st["vk_live"] = bool(kick0.get("live"))
+        st["vk_live"] = bool(vk0.get("live"))
         
         if any_live0:
             set_started_at_from_kick(st, kick0)
@@ -2123,6 +2182,13 @@ def screenshot_refresher_forever() -> None:
                 time.sleep(max(2, int(SHOT_REFRESH_SEC)))
                 continue
             if vk.get("live"):
+                vk_playback = vk.get("playback_url")
+                if vk_playback:
+                    img = screenshot_from_m3u8_fast(vk_playback)
+                    if img:
+                        _shot_cache_set(img)
+                        time.sleep(max(2, int(SHOT_REFRESH_SEC)))
+                        continue
                 img = screenshot_from_vk_page(VK_PUBLIC_URL)
                 if img:
                     _shot_cache_set(img)
