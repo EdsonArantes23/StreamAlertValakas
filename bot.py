@@ -1252,6 +1252,8 @@ def youtube_fetch() -> dict:
     offline = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
 
     try:
+        # Джиттер: случайная задержка 1-4 сек перед запросом к YouTube
+        time.sleep(random.uniform(1, 4))
         url = bust(YOUTUBE_STREAMS_URL) or YOUTUBE_STREAMS_URL
         r = http_request_ext("GET", url, headers=headers, timeout=25, allow_redirects=True)
         html = r.text
