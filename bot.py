@@ -877,9 +877,9 @@ def get_platform_keyboard() -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "🎥 Kick", "url": KICK_PUBLIC_URL},
-                {"text": "🎮 VK Play", "url": VK_PUBLIC_URL},
-                {"text": "📺 YouTube", "url": YOUTUBE_STREAMS_URL}
+                {"text": "🎥 Kick", "url": KICK_PUBLIC_URL, "style": "success"},
+                {"text": "🎮 VK Play", "url": VK_PUBLIC_URL, "style": "primary"},
+                {"text": "📺 YouTube", "url": YOUTUBE_STREAMS_URL, "style": "danger"}
             ]
         ]
     }
