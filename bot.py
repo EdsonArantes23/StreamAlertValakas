@@ -506,6 +506,7 @@ def reset_stream_session(st: dict) -> None:
     st["last_change_sent_ts"] = 0
     st["last_platform_toggle_ts"] = 0
     st["last_start_sent_ts"] = 0
+    st["youtube_video_id"] = None
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
     if not kick.get("live"):
@@ -724,7 +725,7 @@ def notify_admin_dedup(key: str, text: str) -> None:
     notify_admin(text)
 
 def default_state() -> dict:
-    return {"any_live": False, "kick_live": False, "vk_live": False, "started_at": None, "startup_ping_sent": False, "kick_title": None, "kick_cat": None, "vk_title": None, "vk_cat": None, "kick_viewers": None, "vk_viewers": None, "last_start_sent_ts": 0, "last_change_sent_ts": 0, "last_platform_toggle_ts": 0, "last_boot_status_ts": 0, "last_no_stream_start_ts": 0, "updates_offset": 0, "last_command_seen_ts": 0, "last_commands_recover_ts": 0, "last_updates_poll_ts": 0, "end_streak": 0, "transition_streak": 0, "last_any_live_ts": 0, "end_sent_for_started_at": None, "end_sent_ts": 0, "last_409_notify_ts": 0, "admin_private_chat_id": 0, "last_disk_check_ts": 0, "last_temp_cleanup_ts": 0, "last_quota_notify_ts": 0, "stream_stats": None, "is_first_poll": True}
+    return {"any_live": False, "kick_live": False, "vk_live": False, "started_at": None, "startup_ping_sent": False, "kick_title": None, "kick_cat": None, "vk_title": None, "vk_cat": None, "kick_viewers": None, "vk_viewers": None, "last_start_sent_ts": 0, "last_change_sent_ts": 0, "last_platform_toggle_ts": 0, "last_boot_status_ts": 0, "last_no_stream_start_ts": 0, "updates_offset": 0, "last_command_seen_ts": 0, "last_commands_recover_ts": 0, "last_updates_poll_ts": 0, "end_streak": 0, "transition_streak": 0, "last_any_live_ts": 0, "end_sent_for_started_at": None, "end_sent_ts": 0, "last_409_notify_ts": 0, "admin_private_chat_id": 0, "last_disk_check_ts": 0, "last_temp_cleanup_ts": 0, "last_quota_notify_ts": 0, "stream_stats": None, "is_first_poll": True, "youtube_video_id": None}
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
@@ -874,12 +875,21 @@ def tg_send_chat_action(chat_id: int, thread_id: int | None, action: str) -> Non
         pass
 
 def get_platform_keyboard() -> dict:
+    yt_url = YOUTUBE_STREAMS_URL
+    try:
+        with STATE_LOCK:
+            st = load_state()
+            vid = st.get("youtube_video_id")
+            if vid:
+                yt_url = f"https://www.youtube.com/watch?v={vid}"
+    except Exception:
+        pass
     return {
         "inline_keyboard": [
             [
                 {"text": "🎥 Kick", "url": KICK_PUBLIC_URL, "style": "success"},
                 {"text": "🎮 VK Play", "url": VK_PUBLIC_URL, "style": "primary"},
-                {"text": "📺 YouTube", "url": YOUTUBE_STREAMS_URL, "style": "danger"}
+                {"text": "📺 YouTube", "url": yt_url, "style": "danger"}
             ]
         ]
     }
@@ -1249,7 +1259,7 @@ def youtube_fetch() -> dict:
         "Pragma": "no-cache"
     })
 
-    offline = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
+    offline = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "video_id": None}
 
     try:
         # Джиттер: случайная задержка 1-4 сек перед запросом к YouTube
@@ -1322,7 +1332,9 @@ def youtube_fetch() -> dict:
                             for part in parts:
                                 text_obj = part.get("text") or {}
                                 text_content = text_obj.get("content", "")
-                                # Ищем "X смотрят" или "X watching"
+                                if viewers is not None:
+                                    break
+                                # Формат EN: "399 watching" (число перед ключевым словом)
                                 vm = re.search(r'(\d[\d\s.,]*)\s*(?:смотрят|watching|watchers)', text_content, re.IGNORECASE)
                                 if vm:
                                     try:
@@ -1330,17 +1342,43 @@ def youtube_fetch() -> dict:
                                         viewers = int(raw)
                                     except Exception:
                                         pass
-                        # Превью
+                                    break
+                                # Формат RU: "Зрителей: 469" (число после ключевого слова)
+                                vm2 = re.search(r'(?:зрителей|viewers?)\s*:\s*(\d[\d\s.,]*)', text_content, re.IGNORECASE)
+                                if vm2:
+                                    try:
+                                        raw = vm2.group(1).replace(" ", "").replace(",", "").replace(".", "")
+                                        viewers = int(raw)
+                                    except Exception:
+                                        pass
+                                    break
+                                # Fallback: любое число в метаданных (страница "Трансляции" показывает только текущий стрим)
+                                vm3 = re.search(r'(\d[\d\s.,]+)', text_content)
+                                if vm3:
+                                    try:
+                                        raw = vm3.group(1).replace(" ", "").replace(",", "").replace(".", "")
+                                        num = int(raw)
+                                        if num > 0:
+                                            viewers = num
+                                    except Exception:
+                                        pass
+                        # Превью и video ID
                         thumb = None
+                        video_id = None
                         sources = tvm.get("image", {}).get("sources") or []
                         if sources:
                             thumb = sources[-1].get("url") or sources[0].get("url") or None
+                        if thumb:
+                            vid_match = re.search(r'/vi/([a-zA-Z0-9_-]+)/', thumb)
+                            if vid_match:
+                                video_id = vid_match.group(1)
                         live_data = {
                             "live": True,
                             "title": trim(title_text, MAX_TITLE_LEN) if title_text else None,
                             "category": "Стрим",
                             "viewers": viewers,
                             "thumb": thumb,
+                            "video_id": video_id,
                         }
                         break
                     if live_data:
@@ -1367,6 +1405,7 @@ def youtube_fetch() -> dict:
                 if thumb_match:
                     thumb = thumb_match.group(1)
                 viewers = None
+                # EN: "399 watching" (число перед ключевым словом)
                 viewers_match = re.search(r'(\d[\d\s.,]*)\s*(?:смотрят|watching|watchers)', html, re.IGNORECASE)
                 if viewers_match:
                     try:
@@ -1374,12 +1413,22 @@ def youtube_fetch() -> dict:
                         viewers = int(raw)
                     except Exception:
                         pass
+                # RU: "Зрителей: 469" (число после ключевого слова)
+                if viewers is None:
+                    viewers_match2 = re.search(r'(?:зрителей|viewers?)\s*:\s*(\d[\d\s.,]*)', html, re.IGNORECASE)
+                    if viewers_match2:
+                        try:
+                            raw = viewers_match2.group(1).replace(" ", "").replace(",", "").replace(".", "")
+                            viewers = int(raw)
+                        except Exception:
+                            pass
                 live_data = {
                     "live": True,
                     "title": trim(title, MAX_TITLE_LEN) if title else None,
                     "category": "Стрим",
                     "viewers": viewers,
                     "thumb": thumb,
+                    "video_id": None,
                 }
                 log_line(f"YouTube regex fallback: live=True, title='{title}', viewers={viewers}")
 
@@ -1865,6 +1914,7 @@ def commands_loop_once():
                 st_cur["kick_viewers"] = kick.get("viewers")
                 st_cur["vk_viewers"] = vk.get("viewers")
                 st_cur["yt_viewers"] = yt.get("viewers")
+                st_cur["youtube_video_id"] = yt.get("video_id")
                 save_state(st_cur)
             if not (kick.get("live") or vk.get("live") or yt.get("live")):
                 try:
@@ -1999,6 +2049,7 @@ def main_loop():
         st["kick_viewers"] = kick0.get("viewers")
         st["vk_viewers"] = vk0.get("viewers")
         st["yt_viewers"] = yt0.get("viewers")
+        st["youtube_video_id"] = yt0.get("video_id")
         
         # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: маркируем первую итерацию
         st["is_first_poll"] = True
@@ -2120,6 +2171,7 @@ def main_loop():
                     st_start["kick_viewers"] = kick.get("viewers")
                     st_start["vk_viewers"] = vk.get("viewers")
                     st_start["yt_viewers"] = yt.get("viewers")
+                    st_start["youtube_video_id"] = yt.get("video_id")
                     st_start["is_first_poll"] = False
                     save_state(st_start)
                 try:
@@ -2322,6 +2374,7 @@ def main_loop():
                     st_end2["kick_viewers"] = None
                     st_end2["vk_viewers"] = None
                     st_end2["yt_viewers"] = None
+                    st_end2["youtube_video_id"] = None
                     st_end2["any_live"] = False
                     st_end2["kick_live"] = False
                     st_end2["vk_live"] = False
@@ -2362,6 +2415,7 @@ def main_loop():
             st["kick_viewers"] = kick.get("viewers")
             st["vk_viewers"] = vk.get("viewers")
             st["yt_viewers"] = yt.get("viewers")
+            st["youtube_video_id"] = yt.get("video_id")
             
             # Сбрасываем флаг первого опроса
             st["is_first_poll"] = False
