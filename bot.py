@@ -6,6 +6,7 @@ import random
 import subprocess
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 import shutil
 import glob
 from datetime import datetime, timezone, timedelta
@@ -93,7 +94,7 @@ FFMPEG_SCALE = os.getenv("FFMPEG_SCALE", "1280:-1").strip()
 MAX_TITLE_LEN = int(os.getenv("MAX_TITLE_LEN", "180"))
 MAX_GAME_LEN = int(os.getenv("MAX_GAME_LEN", "120"))
 
-END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "30"))
+END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "20"))
 TRANSITION_GRACE_PERIOD_SEC = int(os.getenv("TRANSITION_GRACE_PERIOD_SEC", "90"))
 TRANSITION_STREAK_THRESHOLD = int(os.getenv("TRANSITION_STREAK_THRESHOLD", "3"))
 
@@ -110,7 +111,7 @@ BOT_NOTIFY_COOLDOWN_SEC = int(os.getenv("BOT_NOTIFY_COOLDOWN_SEC", str(6 * 60 * 
 BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
 RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
-SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "3600"))
+SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "7200"))
 
 KICK_API_URL = f"https://kick.com/api/v1/channels/{KICK_SLUG}"
 KICK_PUBLIC_URL = f"https://kick.com/{KICK_SLUG}"
@@ -1262,8 +1263,8 @@ def youtube_fetch() -> dict:
     offline = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "video_id": None}
 
     try:
-        # Джиттер: случайная задержка 1-4 сек перед запросом к YouTube
-        time.sleep(random.uniform(1, 4))
+        # Джиттер: случайная задержка 0.5-1.5 сек перед запросом к YouTube
+        time.sleep(random.uniform(0.5, 1.5))
         url = bust(YOUTUBE_STREAMS_URL) or YOUTUBE_STREAMS_URL
         r = http_request_ext("GET", url, headers=headers, timeout=25, allow_redirects=True)
         html = r.text
@@ -1442,6 +1443,74 @@ def youtube_fetch() -> dict:
     except Exception as e:
         log_line(f"YouTube fetch HTTP error: {e}")
         return offline
+
+def fetch_all_platforms():
+    """Fetch Kick, VK, YouTube in parallel to reduce poll cycle latency."""
+    default_kick = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
+    default_vk = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
+    default_yt = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "video_id": None}
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        kick_f = executor.submit(kick_fetch)
+        vk_f = executor.submit(vk_fetch_best_effort)
+        yt_f = executor.submit(youtube_fetch)
+
+        kick = dict(default_kick)
+        vk = dict(default_vk)
+        yt = dict(default_yt)
+
+        for name, future, default, timeout_s in [
+            ("Kick", kick_f, default_kick, 35),
+            ("VK", vk_f, default_vk, 35),
+            ("YouTube", yt_f, default_yt, 45),
+        ]:
+            try:
+                result = future.result(timeout=timeout_s)
+                if isinstance(result, dict) and "live" in result:
+                    if name == "Kick":
+                        kick = result
+                    elif name == "VK":
+                        vk = result
+                    else:
+                        yt = result
+                else:
+                    log_line(f"Parallel {name} fetch returned invalid result: {result}")
+            except Exception as e:
+                log_line(f"Parallel {name} fetch error: {e}")
+
+    return kick, vk, yt
+
+HEARTBEAT_INTERVAL_SEC = int(os.getenv("HEARTBEAT_INTERVAL_SEC", "1800"))
+
+def heartbeat_forever():
+    """Periodic heartbeat: sends a ping to admin so they know the bot is alive."""
+    while True:
+        try:
+            time.sleep(HEARTBEAT_INTERVAL_SEC)
+            with STATE_LOCK:
+                st = load_state()
+            any_live = bool(st.get("any_live"))
+            kick_live = bool(st.get("kick_live"))
+            vk_live = bool(st.get("vk_live"))
+            yt_live = bool(st.get("yt_live"))
+            started = st.get("started_at")
+            running = fmt_running_line(st)
+            status_icon = "🟢" if any_live else "⚪"
+            platforms = []
+            if kick_live:
+                platforms.append("Kick")
+            if vk_live:
+                platforms.append("VK")
+            if yt_live:
+                platforms.append("YT")
+            plat_str = ", ".join(platforms) if platforms else "все офлайн"
+            msg = f"💓 Heartbeat: {status_icon} {plat_str} | {running}"
+            if started:
+                msg += f" | Старт: {fmt_msk(dt_from_iso(started))}"
+            notify_admin(msg)
+        except Exception as e:
+            log_line(f"Heartbeat error: {e}")
+            time.sleep(60)
 
 def build_caption(prefix: str, st: dict, kick: dict, vk: dict, yt: dict = None) -> str:
     running = fmt_running_line(st)
@@ -1973,10 +2042,8 @@ def main_loop_forever():
             time.sleep(LOOP_CRASH_SLEEP)
 
 def main_loop():
-    # Initial fetch
-    kick0 = kick_fetch()
-    vk0 = vk_fetch_best_effort()
-    yt0 = youtube_fetch()
+    # Initial fetch (all platforms in parallel)
+    kick0, vk0, yt0 = fetch_all_platforms()
     
     any_live0 = bool(kick0.get("live") or vk0.get("live") or yt0.get("live"))
     
@@ -2117,10 +2184,8 @@ def main_loop():
     
     # Main monitoring loop
     while True:
-        # Fetch current data
-        kick = kick_fetch()
-        vk = vk_fetch_best_effort()
-        yt = youtube_fetch()
+        # Fetch current data (all platforms in parallel)
+        kick, vk, yt = fetch_all_platforms()
         
         # Load previous state for comparison
         with STATE_LOCK:
@@ -2500,6 +2565,7 @@ def main():
         threading.Thread(target=commands_loop_forever, daemon=True).start()
         threading.Thread(target=commands_watchdog_forever, daemon=True).start()
     threading.Thread(target=screenshot_refresher_forever, daemon=True).start()
+    threading.Thread(target=heartbeat_forever, daemon=True).start()
     main_loop_forever()
 
 if __name__ == "__main__":
