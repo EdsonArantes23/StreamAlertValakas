@@ -1480,38 +1480,6 @@ def fetch_all_platforms():
 
     return kick, vk, yt
 
-HEARTBEAT_INTERVAL_SEC = int(os.getenv("HEARTBEAT_INTERVAL_SEC", "1800"))
-
-def heartbeat_forever():
-    """Periodic heartbeat: sends a ping to admin so they know the bot is alive."""
-    while True:
-        try:
-            time.sleep(HEARTBEAT_INTERVAL_SEC)
-            with STATE_LOCK:
-                st = load_state()
-            any_live = bool(st.get("any_live"))
-            kick_live = bool(st.get("kick_live"))
-            vk_live = bool(st.get("vk_live"))
-            yt_live = bool(st.get("yt_live"))
-            started = st.get("started_at")
-            running = fmt_running_line(st)
-            status_icon = "🟢" if any_live else "⚪"
-            platforms = []
-            if kick_live:
-                platforms.append("Kick")
-            if vk_live:
-                platforms.append("VK")
-            if yt_live:
-                platforms.append("YT")
-            plat_str = ", ".join(platforms) if platforms else "все офлайн"
-            msg = f"💓 Heartbeat: {status_icon} {plat_str} | {running}"
-            if started:
-                msg += f" | Старт: {fmt_msk(dt_from_iso(started))}"
-            notify_admin(msg)
-        except Exception as e:
-            log_line(f"Heartbeat error: {e}")
-            time.sleep(60)
-
 def build_caption(prefix: str, st: dict, kick: dict, vk: dict, yt: dict = None) -> str:
     running = fmt_running_line(st)
     lines: list[str] = []
@@ -2565,7 +2533,6 @@ def main():
         threading.Thread(target=commands_loop_forever, daemon=True).start()
         threading.Thread(target=commands_watchdog_forever, daemon=True).start()
     threading.Thread(target=screenshot_refresher_forever, daemon=True).start()
-    threading.Thread(target=heartbeat_forever, daemon=True).start()
     main_loop_forever()
 
 if __name__ == "__main__":
