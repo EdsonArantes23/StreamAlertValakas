@@ -94,17 +94,16 @@ BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
 SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "7200"))
 
-# ===== НАСТРОЙКА ЗАДЕРЖКИ ОТКЛЮЧЕНИЯ (в секундах) =====
-# Сколько секунд платформа должна быть оффлайн, прежде чем бот напишет "отключен".
-# По умолчанию 90 сек. Хотите 400 сек — поменяйте число ниже.
-VK_OFFLINE_GRACE_SEC = int(os.getenv("VK_OFFLINE_GRACE_SEC", "90"))
-KICK_OFFLINE_GRACE_SEC = int(os.getenv("KICK_OFFLINE_GRACE_SEC", "90"))
-YT_OFFLINE_GRACE_SEC = int(os.getenv("YT_OFFLINE_GRACE_SEC", "90"))
+# ===== ЗАДЕРЖКА ПЕРЕД УВЕДОМЛЕНИЕМ "ОТКЛЮЧЕН" (в секундах) =====
+# Если платформа пропала на меньшее время — бот молчит.
+# Хочешь 400 секунд — поменяй число ниже.
+VK_OFFLINE_GRACE_SEC = int(os.getenv("VK_OFFLINE_GRACE_SEC", "300"))
 
 KICK_API_URL = f"https://kick.com/api/v1/channels/{KICK_SLUG}"
 KICK_PUBLIC_URL = f"https://kick.com/{KICK_SLUG}"
 VK_PUBLIC_URL = f"https://live.vkvideo.ru/{VK_SLUG}"
 YOUTUBE_STREAMS_URL = f"https://www.youtube.com/@{YOUTUBE_HANDLE}/streams"
+YOUTUBE_CHANNEL_URL = f"https://www.youtube.com/@{YOUTUBE_HANDLE}"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 HEADERS_JSON = {"User-Agent": UA, "Accept": "application/json,text/plain,*/*"}
 HEADERS_HTML = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
@@ -133,6 +132,7 @@ FFMPEG_CMD_TIMEOUT_SEC = int(os.getenv("FFMPEG_CMD_TIMEOUT_SEC", "8"))
 LOG_FILE = os.getenv("LOG_FILE", "bot_runtime.log")
 last_error_notify = {}
 
+
 def log_line(msg: str) -> None:
     msg = _mask_secrets(msg)
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -147,11 +147,14 @@ def log_line(msg: str) -> None:
     except Exception:
         pass
 
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
+
 def ts() -> int:
     return int(time.time())
+
 
 def _cache_set_snapshot(st: dict, kick: dict, vk: dict, yt: dict = None) -> None:
     global CACHED_AT_TS, CACHED_KICK, CACHED_VK, CACHED_YT, CACHED_STATE
@@ -161,6 +164,7 @@ def _cache_set_snapshot(st: dict, kick: dict, vk: dict, yt: dict = None) -> None
     CACHED_YT = dict(yt or {})
     CACHED_STATE = dict(st or {})
 
+
 def _cache_get_snapshot():
     age = ts() - int(CACHED_AT_TS or 0)
     if CACHED_STATE is None or CACHED_KICK is None or CACHED_VK is None:
@@ -169,10 +173,12 @@ def _cache_get_snapshot():
         return None
     return dict(CACHED_STATE), dict(CACHED_KICK), dict(CACHED_VK), dict(CACHED_YT or {}), age
 
+
 def _shot_cache_set(img: bytes) -> None:
     global CACHED_SHOT_AT_TS, CACHED_SHOT_BYTES
     CACHED_SHOT_AT_TS = ts()
     CACHED_SHOT_BYTES = img
+
 
 def _shot_cache_get():
     if not CACHED_SHOT_BYTES:
@@ -182,7 +188,9 @@ def _shot_cache_get():
         return None
     return CACHED_SHOT_BYTES, age
 
+
 MSK_TZ = timezone(timedelta(hours=3))
+
 
 def dt_from_iso(iso_s: str | None) -> datetime | None:
     if not iso_s:
@@ -192,6 +200,7 @@ def dt_from_iso(iso_s: str | None) -> datetime | None:
     except Exception:
         return None
 
+
 def fmt_msk(dt: datetime | None) -> str:
     if not dt:
         return "—"
@@ -200,16 +209,20 @@ def fmt_msk(dt: datetime | None) -> str:
     except Exception:
         return "—"
 
+
 def now_msk_str() -> str:
     return fmt_msk(now_utc())
 
+
 STATS_MAX_KEYS = 20
 STATS_MAX_PRINT = 100
+
 
 def _norm_key(x: str | None) -> str:
     s = (x or "—")
     s = str(s).strip()
     return s if s else "—"
+
 
 def _clean_stream_title(title: str | None) -> str | None:
     if not title:
@@ -220,14 +233,17 @@ def _clean_stream_title(title: str | None) -> str | None:
     title = re.sub(r'\s+', ' ', title).strip()
     return title if title else None
 
+
 def _add_dur(d: dict, key: str, delta: int) -> None:
     key = _norm_key(key)
     if key not in d and len(d) >= STATS_MAX_KEYS:
         key = "Другое"
     d[key] = int(d.get(key, 0)) + int(delta)
 
+
 def _plat_init() -> dict:
     return {"min": None, "max": None, "sum": 0, "samples": 0, "peak_ts": 0, "min_ts": 0, "title_changes": 0, "cat_changes": 0}
+
 
 def _stats_init(st: dict, kick: dict, vk: dict, now_ts: int, yt: dict = None) -> dict:
     if not st.get("started_at"):
@@ -253,8 +269,9 @@ def _stats_init(st: dict, kick: dict, vk: dict, now_ts: int, yt: dict = None) ->
         "vk_last_cat": _norm_key(vk.get("category")),
         "vk_last_title": _norm_key(vk.get("title")),
         "yt_last_title": _norm_key((yt or {}).get("title")),
-        "both_live_sec": 0
+        "both_live_sec": 0,
     }
+
 
 def _plat_sample(p: dict, viewers, now_ts: int) -> None:
     if not isinstance(viewers, int):
@@ -270,6 +287,7 @@ def _plat_sample(p: dict, viewers, now_ts: int) -> None:
     if cur_max is None or v > int(cur_max):
         p["max"] = v
         p["peak_ts"] = int(now_ts)
+
 
 def stats_tick(st: dict, kick: dict, vk: dict, any_live: bool, now_ts: int | None = None, yt: dict = None) -> None:
     now_ts = int(now_ts or ts())
@@ -333,6 +351,7 @@ def stats_tick(st: dict, kick: dict, vk: dict, any_live: bool, now_ts: int | Non
     stats["yt_last_title"] = _norm_key((yt or {}).get("title"))
     st["stream_stats"] = stats
 
+
 def stats_finalize_end(st: dict, now_ts: int | None = None) -> None:
     now_ts = int(now_ts or ts())
     stats = st.get("stream_stats")
@@ -341,12 +360,14 @@ def stats_finalize_end(st: dict, now_ts: int | None = None) -> None:
     stats["end_ts"] = int(now_ts)
     st["stream_stats"] = stats
 
+
 def _fmt_avg(p: dict) -> str:
     samples = int(p.get("samples", 0) or 0)
     if samples <= 0:
         return "—"
     s = int(p.get("sum", 0) or 0)
     return str(int(round(s / samples)))
+
 
 def build_end_report(st: dict) -> str:
     start_dt = dt_from_iso(st.get("started_at"))
@@ -403,7 +424,7 @@ def build_end_report(st: dict) -> str:
             return out
         pstats = (stats.get(key) or {}) if isinstance(stats.get(key), dict) else {}
         out.append(f"👥 Зрители (min/avg/max): <b>{fmt_viewers(pstats.get('min'))}</b> / {_fmt_avg(pstats)} / <b>{fmt_viewers(pstats.get('max'))}</b>")
-        out.append(f"🔁 Смен названия: <b>{int(pstats.get('title_changes',0) or 0)}</b> • Смен категории: <b>{int(pstats.get('cat_changes',0) or 0)}</b>")
+        out.append(f"🔁 Смен названия: <b>{int(pstats.get('title_changes', 0) or 0)}</b> • Смен категории: <b>{int(pstats.get('cat_changes', 0) or 0)}</b>")
         cat_tl = stats.get(f"{key}_cat_timeline") or []
         title_tl = stats.get(f"{key}_title_timeline") or []
         out.append("")
@@ -412,7 +433,7 @@ def build_end_report(st: dict) -> str:
         if cats:
             out += cats[:STATS_MAX_PRINT]
             if len(cats) > STATS_MAX_PRINT:
-                out.append(f"… ещё {len(cats)-STATS_MAX_PRINT}")
+                out.append(f"… ещё {len(cats) - STATS_MAX_PRINT}")
         else:
             out.append("—")
         out.append("")
@@ -421,7 +442,7 @@ def build_end_report(st: dict) -> str:
         if titles:
             out += titles[:STATS_MAX_PRINT]
             if len(titles) > STATS_MAX_PRINT:
-                out.append(f"… ещё {len(titles)-STATS_MAX_PRINT}")
+                out.append(f"… ещё {len(titles) - STATS_MAX_PRINT}")
         else:
             out.append("—")
         out.append("")
@@ -436,14 +457,17 @@ def build_end_report(st: dict) -> str:
     out = "\n".join(lines)
     return out[:3900] + ("…" if len(out) > 3900 else "")
 
+
 def bust(url: str | None) -> str | None:
     if not url:
         return None
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}t={ts()}"
 
+
 def esc(s: str | None) -> str:
     return html_escape(s or "—", quote=False)
+
 
 def trim(s: str | None, n: int) -> str | None:
     if not s:
@@ -451,8 +475,10 @@ def trim(s: str | None, n: int) -> str | None:
     s = str(s).strip()
     return s if len(s) <= n else (s[:n - 1] + "…")
 
+
 def fmt_viewers(v) -> str:
     return str(v) if isinstance(v, int) else "—"
+
 
 def fmt_duration(seconds: int) -> str:
     seconds = max(0, int(seconds))
@@ -460,11 +486,13 @@ def fmt_duration(seconds: int) -> str:
     m = (seconds % 3600) // 60
     return f"{h:02d} ч. {m:02d} мин."
 
+
 def fmt_hhmm(seconds: int) -> str:
     seconds = max(0, int(seconds))
     h = seconds // 3600
     m = (seconds % 3600) // 60
     return f"{h:02d}:{m:02d}"
+
 
 def fmt_msk_hm_from_ts(ts_int: int) -> str:
     try:
@@ -472,6 +500,7 @@ def fmt_msk_hm_from_ts(ts_int: int) -> str:
         return dt.strftime("%H:%M")
     except Exception:
         return "--:--"
+
 
 def _seg_add(segments: list, start_ts: int, end_ts: int, value: str) -> None:
     if end_ts <= start_ts:
@@ -484,6 +513,7 @@ def _seg_add(segments: list, start_ts: int, end_ts: int, value: str) -> None:
             return
     segments.append({"start_ts": int(start_ts), "end_ts": int(end_ts), "value": value})
 
+
 def parse_kick_created_at(s: str | None) -> datetime | None:
     if not s:
         return None
@@ -493,7 +523,9 @@ def parse_kick_created_at(s: str | None) -> datetime | None:
     except Exception:
         return None
 
+
 def reset_stream_session(st: dict) -> None:
+    """Полный сброс всех полей, связанных с текущим стримом"""
     st["stream_stats"] = None
     st["end_streak"] = 0
     st["end_sent_for_started_at"] = None
@@ -513,6 +545,8 @@ def reset_stream_session(st: dict) -> None:
     st["last_platform_toggle_ts"] = 0
     st["last_start_sent_ts"] = 0
     st["youtube_video_id"] = None
+    st["vk_offline_streak"] = 0
+
 
 def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
     if not kick.get("live"):
@@ -543,6 +577,7 @@ def sync_kick_session(st: dict, kick: dict, force: bool = False) -> bool:
         return True
     return False
 
+
 def seconds_since_started(st: dict) -> int | None:
     started_at = st.get("started_at")
     if not started_at:
@@ -553,17 +588,20 @@ def seconds_since_started(st: dict) -> int | None:
     except Exception:
         return None
 
+
 def fmt_running_line(st: dict) -> str:
     sec = seconds_since_started(st)
     if sec is None:
         return "Идёт: —"
     return f"Идёт: {fmt_duration(sec)}"
 
+
 def _sleep_backoff(attempt: int, base: float, cap: float, jitter: bool) -> None:
     delay = min((base ** attempt), cap)
     if jitter:
         delay *= random.uniform(0.85, 1.35)
     time.sleep(delay)
+
 
 def http_request_ext(method: str, url: str, *, headers=None, json_body=None, data=None, files=None, timeout=25, allow_redirects=True) -> requests.Response:
     last_exc = None
@@ -589,6 +627,7 @@ def http_request_ext(method: str, url: str, *, headers=None, json_body=None, dat
             _sleep_backoff(attempt, HTTP_BACKOFF_BASE, HTTP_BACKOFF_MAX, HTTP_JITTER)
     raise last_exc
 
+
 def http_request_tg(method: str, url: str, *, json_body=None, data=None, files=None, timeout=(5, 15)) -> requests.Response:
     last_exc = None
     for attempt in range(1, TG_RETRIES + 1):
@@ -613,8 +652,10 @@ def http_request_tg(method: str, url: str, *, json_body=None, data=None, files=N
             _sleep_backoff(attempt, TG_BACKOFF_BASE, TG_BACKOFF_MAX, True)
     raise last_exc
 
+
 def is_telegram_conflict_409(exc: Exception) -> bool:
     return (isinstance(exc, requests.exceptions.HTTPError) and getattr(exc, "response", None) is not None and int(getattr(exc.response, "status_code", 0) or 0) == 409)
+
 
 def cleanup_temp_files() -> None:
     try:
@@ -632,6 +673,7 @@ def cleanup_temp_files() -> None:
                             pass
     except Exception:
         pass
+
 
 def cleanup_pycache() -> None:
     try:
@@ -653,6 +695,7 @@ def cleanup_pycache() -> None:
     except Exception:
         pass
 
+
 def cleanup_old_state_backups() -> None:
     try:
         dir_name = os.path.dirname(STATE_FILE) or "."
@@ -669,15 +712,17 @@ def cleanup_old_state_backups() -> None:
     except Exception:
         pass
 
+
 def fmt_bytes(n: int) -> str:
     n = int(n or 0)
     if n < 1024:
         return f"{n} B"
     if n < 1024 ** 2:
-        return f"{n/1024:.1f} KB"
+        return f"{n / 1024:.1f} KB"
     if n < 1024 ** 3:
-        return f"{n/1024**2:.1f} MB"
-    return f"{n/1024**3:.2f} GB"
+        return f"{n / 1024 ** 2:.1f} MB"
+    return f"{n / 1024 ** 3:.2f} GB"
+
 
 def dir_size_bytes(root: str) -> int:
     total = 0
@@ -693,6 +738,7 @@ def dir_size_bytes(root: str) -> int:
             except Exception:
                 pass
     return total
+
 
 def list_largest_files(root: str, topn: int = 5):
     items = []
@@ -712,11 +758,13 @@ def list_largest_files(root: str, topn: int = 5):
     items.sort(key=lambda x: x[0], reverse=True)
     return items[:max(0, int(topn))]
 
+
 def quota_usage_for_bot():
     quota_bytes = int(BOT_QUOTA_MB) * 1024 * 1024
     used = dir_size_bytes(os.getcwd())
     percent = (used * 100.0 / quota_bytes) if quota_bytes else 0.0
     return percent, used, quota_bytes
+
 
 def notify_admin_dedup(key: str, text: str) -> None:
     now = ts()
@@ -726,11 +774,13 @@ def notify_admin_dedup(key: str, text: str) -> None:
     last_error_notify[key] = now
     notify_admin(text)
 
+
 def default_state() -> dict:
     return {
         "any_live": False, "kick_live": False, "vk_live": False, "yt_live": False,
         "started_at": None, "startup_ping_sent": False,
-        "kick_title": None, "kick_cat": None, "vk_title": None, "vk_cat": None, "yt_title": None, "yt_cat": None,
+        "kick_title": None, "kick_cat": None, "vk_title": None, "vk_cat": None,
+        "yt_title": None, "yt_cat": None,
         "kick_viewers": None, "vk_viewers": None, "yt_viewers": None,
         "last_start_sent_ts": 0, "last_change_sent_ts": 0, "last_platform_toggle_ts": 0,
         "last_boot_status_ts": 0, "last_no_stream_start_ts": 0, "updates_offset": 0,
@@ -739,9 +789,9 @@ def default_state() -> dict:
         "end_sent_for_started_at": None, "end_sent_ts": 0, "last_409_notify_ts": 0,
         "admin_private_chat_id": 0, "last_disk_check_ts": 0, "last_temp_cleanup_ts": 0,
         "last_quota_notify_ts": 0, "stream_stats": None, "is_first_poll": True,
-        "youtube_video_id": None,
-        "kick_offline_streak": 0, "vk_offline_streak": 0, "yt_offline_streak": 0
+        "youtube_video_id": None, "vk_offline_streak": 0,
     }
+
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
@@ -760,16 +810,19 @@ def load_state() -> dict:
     base.update(st)
     return base
 
+
 def save_state(state: dict) -> None:
     d = os.path.dirname(STATE_FILE) or "."
     os.makedirs(d, exist_ok=True)
     tmp_path = os.path.join(d, ".state_tmp.json")
+
     def _write_once() -> None:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, separators=(",", ":"))
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, STATE_FILE)
+
     try:
         _write_once()
     except OSError as e:
@@ -801,10 +854,12 @@ def save_state(state: dict) -> None:
         except Exception:
             pass
 
+
 def tg_api_url(method: str) -> str:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is empty. Set BOT_TOKEN env var on host.")
     return f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+
 
 def tg_call(method: str, payload: dict, *, timeout=(5, 15)) -> dict:
     url = tg_api_url(method)
@@ -813,6 +868,7 @@ def tg_call(method: str, payload: dict, *, timeout=(5, 15)) -> dict:
     if not data.get("ok"):
         raise RuntimeError(f"Telegram API error: {data}")
     return data["result"]
+
 
 def notify_admin(text: str) -> None:
     text = _mask_secrets(text)
@@ -825,6 +881,7 @@ def notify_admin(text: str) -> None:
     except Exception as e:
         log_line(f"notify_admin failed: {e}")
 
+
 def notify_409_dedup(text: str) -> None:
     now = ts()
     with STATE_LOCK:
@@ -836,14 +893,17 @@ def notify_409_dedup(text: str) -> None:
         save_state(st)
         notify_admin(text)
 
+
 def tg_drop_pending_updates_safe() -> None:
     try:
         tg_call("deleteWebhook", {"drop_pending_updates": True}, timeout=(5, 15))
     except Exception as e:
         log_line(f"tg_drop_pending_updates_safe failed: {e}")
 
+
 def tg_get_webhook_info() -> dict:
     return tg_call("getWebhookInfo", {}, timeout=(5, 15))
+
 
 def tg_set_my_commands(commands: list, scope: dict | None = None) -> None:
     payload = {"commands": commands}
@@ -851,16 +911,17 @@ def tg_set_my_commands(commands: list, scope: dict | None = None) -> None:
         payload["scope"] = scope
     tg_call("setMyCommands", payload, timeout=(5, 15))
 
+
 def setup_commands_visibility() -> None:
     public_cmds = [
         {"command": "stream", "description": "Текущий статус патока"},
         {"command": "status", "description": "Текущий статус патока"},
         {"command": "patok", "description": "Текущий статус патока"},
-        {"command": "state", "description": "Состояние бота"}
+        {"command": "state", "description": "Состояние бота"},
     ]
     admin_cmds = [
         {"command": "admin", "description": "Диагностика (только админ)"},
-        {"command": "admin_reset_offset", "description": "Сброс offset polling (только админ)"}
+        {"command": "admin_reset_offset", "description": "Сброс offset polling (только админ)"},
     ]
     tg_set_my_commands(public_cmds, scope={"type": "all_group_chats"})
     with STATE_LOCK:
@@ -868,6 +929,7 @@ def setup_commands_visibility() -> None:
         admin_chat = int(st.get("admin_private_chat_id") or 0)
         if admin_chat != 0:
             tg_set_my_commands(public_cmds + admin_cmds, scope={"type": "chat", "chat_id": admin_chat})
+
 
 def tg_get_updates(offset: int, timeout: int) -> list:
     url = tg_api_url("getUpdates")
@@ -879,6 +941,7 @@ def tg_get_updates(offset: int, timeout: int) -> list:
         raise RuntimeError(f"Telegram getUpdates error: {data}")
     return data.get("result", [])
 
+
 def tg_send_chat_action(chat_id: int, thread_id: int | None, action: str) -> None:
     try:
         payload = {"chat_id": int(chat_id), "action": action}
@@ -887,6 +950,7 @@ def tg_send_chat_action(chat_id: int, thread_id: int | None, action: str) -> Non
         tg_call("sendChatAction", payload, timeout=(5, 10))
     except Exception:
         pass
+
 
 def get_platform_keyboard() -> dict:
     yt_url = YOUTUBE_STREAMS_URL
@@ -902,9 +966,10 @@ def get_platform_keyboard() -> dict:
         "inline_keyboard": [[
             {"text": "🎥 Kick", "url": KICK_PUBLIC_URL},
             {"text": "🎮 VK Play", "url": VK_PUBLIC_URL},
-            {"text": "📺 YouTube", "url": yt_url}
+            {"text": "📺 YouTube", "url": yt_url},
         ]]
     }
+
 
 def tg_send_to(chat_id: int, thread_id: int | None, text: str, reply_to: int | None = None, with_buttons: bool = True) -> int:
     payload = {"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True, "parse_mode": "HTML"}
@@ -917,8 +982,10 @@ def tg_send_to(chat_id: int, thread_id: int | None, text: str, reply_to: int | N
     res = tg_call("sendMessage", payload, timeout=(5, 15))
     return int(res["message_id"])
 
+
 def tg_send(text: str) -> int:
     return tg_send_to(GROUP_ID, TOPIC_ID, text, reply_to=None)
+
 
 def maybe_send_to_pubg_topic(text: str, st: dict, kick: dict) -> None:
     try:
@@ -928,9 +995,22 @@ def maybe_send_to_pubg_topic(text: str, st: dict, kick: dict) -> None:
     except Exception as e:
         log_line(f"PUBG duplicate send error: {e}")
 
+
 def tg_send_main_and_maybe_pubg(text: str, st: dict, kick: dict) -> None:
     tg_send(text)
     maybe_send_to_pubg_topic(text, st, kick)
+
+
+def tg_send_photo_url_to(chat_id: int, thread_id: int | None, photo_url: str, caption: str, reply_to: int | None = None) -> int:
+    payload = {"chat_id": chat_id, "photo": bust(photo_url), "caption": caption[:1024], "parse_mode": "HTML"}
+    if thread_id is not None:
+        payload["message_thread_id"] = int(thread_id)
+    if reply_to is not None:
+        payload["reply_to_message_id"] = int(reply_to)
+    payload["reply_markup"] = get_platform_keyboard()
+    res = tg_call("sendPhoto", payload, timeout=(5, 25))
+    return int(res["message_id"])
+
 
 def tg_send_photo_upload_to(chat_id: int, thread_id: int | None, image_bytes: bytes, caption: str, filename: str, reply_to: int | None = None) -> int:
     url = tg_api_url("sendPhoto")
@@ -947,21 +1027,13 @@ def tg_send_photo_upload_to(chat_id: int, thread_id: int | None, image_bytes: by
         raise RuntimeError(f"Telegram API error: {out}")
     return int(out["result"]["message_id"])
 
-def tg_send_photo_url_to(chat_id: int, thread_id: int | None, photo_url: str, caption: str, reply_to: int | None = None) -> int:
-    payload = {"chat_id": chat_id, "photo": bust(photo_url), "caption": caption[:1024], "parse_mode": "HTML"}
-    if thread_id is not None:
-        payload["message_thread_id"] = int(thread_id)
-    if reply_to is not None:
-        payload["reply_to_message_id"] = int(reply_to)
-    payload["reply_markup"] = get_platform_keyboard()
-    res = tg_call("sendPhoto", payload, timeout=(5, 25))
-    return int(res["message_id"])
 
 def download_image(url: str) -> bytes:
     u = bust(url) or url
     headers = {"User-Agent": UA, "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8", "Cache-Control": "no-cache", "Pragma": "no-cache"}
     r = http_request_ext("GET", u, headers=headers, timeout=25)
     return r.content
+
 
 def tg_send_to_cmd(chat_id: int, thread_id: int | None, text: str, reply_to: int | None = None) -> int:
     payload = {"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True, "parse_mode": "HTML"}
@@ -972,6 +1044,18 @@ def tg_send_to_cmd(chat_id: int, thread_id: int | None, text: str, reply_to: int
     payload["reply_markup"] = get_platform_keyboard()
     res = tg_call("sendMessage", payload, timeout=(4, TG_CMD_SEND_TIMEOUT_SEC))
     return int(res["message_id"])
+
+
+def tg_send_photo_url_to_cmd(chat_id: int, thread_id: int | None, photo_url: str, caption: str, reply_to: int | None = None) -> int:
+    payload = {"chat_id": chat_id, "photo": bust(photo_url), "caption": caption[:1024], "parse_mode": "HTML"}
+    if thread_id is not None:
+        payload["message_thread_id"] = int(thread_id)
+    if reply_to is not None:
+        payload["reply_to_message_id"] = int(reply_to)
+    payload["reply_markup"] = get_platform_keyboard()
+    res = tg_call("sendPhoto", payload, timeout=(4, TG_CMD_PHOTO_URL_TIMEOUT_SEC))
+    return int(res["message_id"])
+
 
 def tg_send_photo_upload_to_cmd(chat_id: int, thread_id: int | None, image_bytes: bytes, caption: str, filename: str, reply_to: int | None = None) -> int:
     url = tg_api_url("sendPhoto")
@@ -988,15 +1072,6 @@ def tg_send_photo_upload_to_cmd(chat_id: int, thread_id: int | None, image_bytes
         raise RuntimeError(f"Telegram API error: {out}")
     return int(out["result"]["message_id"])
 
-def tg_send_photo_url_to_cmd(chat_id: int, thread_id: int | None, photo_url: str, caption: str, reply_to: int | None = None) -> int:
-    payload = {"chat_id": chat_id, "photo": bust(photo_url), "caption": caption[:1024], "parse_mode": "HTML"}
-    if thread_id is not None:
-        payload["message_thread_id"] = int(thread_id)
-    if reply_to is not None:
-        payload["reply_to_message_id"] = int(reply_to)
-    payload["reply_markup"] = get_platform_keyboard()
-    res = tg_call("sendPhoto", payload, timeout=(4, TG_CMD_PHOTO_URL_TIMEOUT_SEC))
-    return int(res["message_id"])
 
 def ffmpeg_available() -> bool:
     try:
@@ -1004,6 +1079,7 @@ def ffmpeg_available() -> bool:
         return r.returncode == 0
     except Exception:
         return False
+
 
 def screenshot_from_m3u8(playback_url: str) -> bytes | None:
     if not FFMPEG_ENABLED or not playback_url or not ffmpeg_available():
@@ -1017,6 +1093,7 @@ def screenshot_from_m3u8(playback_url: str) -> bytes | None:
     except Exception:
         return None
 
+
 def screenshot_from_m3u8_fast(playback_url: str) -> bytes | None:
     if not FFMPEG_ENABLED or not playback_url or not ffmpeg_available():
         return None
@@ -1028,6 +1105,7 @@ def screenshot_from_m3u8_fast(playback_url: str) -> bytes | None:
         return p.stdout
     except Exception:
         return None
+
 
 def screenshot_from_m3u8_fresh(playback_url: str) -> bytes | None:
     if not FFMPEG_ENABLED or not playback_url or not ffmpeg_available():
@@ -1046,6 +1124,7 @@ def screenshot_from_m3u8_fresh(playback_url: str) -> bytes | None:
         return None
     except Exception:
         return None
+
 
 def screenshot_from_vk_page(page_url: str) -> bytes | None:
     if not FFMPEG_ENABLED or not page_url or not ffmpeg_available():
@@ -1071,6 +1150,7 @@ def screenshot_from_vk_page(page_url: str) -> bytes | None:
     except Exception as e:
         log_line(f"VK screenshot extraction error: {e}")
     return None
+
 
 def kick_fetch() -> dict:
     try:
@@ -1100,6 +1180,7 @@ def kick_fetch() -> dict:
         log_line(f"Kick fetch error: {e}")
         return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
 
+
 def _parse_vk_slot(slot: dict) -> dict | None:
     if not isinstance(slot, dict) or "isOnline" not in slot:
         return None
@@ -1127,6 +1208,7 @@ def _parse_vk_slot(slot: dict) -> dict | None:
         "thumb": thumb,
     }
 
+
 def _extract_vk_stream_data_from_json(html: str) -> dict | None:
     try:
         scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
@@ -1149,9 +1231,11 @@ def _extract_vk_stream_data_from_json(html: str) -> dict | None:
                 result = _parse_vk_slot(slots[0])
                 if result is not None:
                     return result
+        return None
     except Exception as e:
         log_line(f"VK JSON parse error: {e}")
-    return None
+        return None
+
 
 def vk_fetch_best_effort() -> dict:
     headers = dict(HEADERS_HTML)
@@ -1160,7 +1244,7 @@ def vk_fetch_best_effort() -> dict:
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
         "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
+        "Pragma": "no-cache",
     })
     offline = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
     try:
@@ -1227,6 +1311,7 @@ def vk_fetch_best_effort() -> dict:
         log_line(f"VK fetch HTTP error: {e}")
         return offline
 
+
 def youtube_fetch() -> dict:
     headers = dict(HEADERS_HTML)
     headers.update({
@@ -1234,7 +1319,7 @@ def youtube_fetch() -> dict:
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
         "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
+        "Pragma": "no-cache",
     })
     offline = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "video_id": None}
     try:
@@ -1306,14 +1391,6 @@ def youtube_fetch() -> dict:
                                     except Exception:
                                         pass
                                     break
-                                vm2 = re.search(r'(?:зрителей|viewers?)\s*:\s*(\d[\d\s.,]*)', text_content, re.IGNORECASE)
-                                if vm2:
-                                    try:
-                                        raw = vm2.group(1).replace(" ", "").replace(",", "").replace(".", "")
-                                        viewers = int(raw)
-                                    except Exception:
-                                        pass
-                                    break
                         thumb = None
                         video_id = None
                         sources = tvm.get("image", {}).get("sources") or []
@@ -1341,7 +1418,9 @@ def youtube_fetch() -> dict:
             if not live_badges:
                 live_badges = re.findall(r'"LIVE"', html)
             if live_badges:
-                title_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                title_match = re.search(r'<meta[^>]+name=["\']title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                if not title_match:
+                    title_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
                 title = title_match.group(1).strip() if title_match else None
                 if title:
                     title = re.sub(r'^.*?-\s*YouTube\s*[-–|]\s*', '', title).strip()
@@ -1377,6 +1456,7 @@ def youtube_fetch() -> dict:
         log_line(f"YouTube fetch HTTP error: {e}")
         return offline
 
+
 def fetch_all_platforms():
     default_kick = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
     default_vk = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
@@ -1388,7 +1468,11 @@ def fetch_all_platforms():
         kick = dict(default_kick)
         vk = dict(default_vk)
         yt = dict(default_yt)
-        for name, future, default, timeout_s in [("Kick", kick_f, default_kick, 35), ("VK", vk_f, default_vk, 35), ("YouTube", yt_f, default_yt, 45)]:
+        for name, future, default, timeout_s in [
+            ("Kick", kick_f, default_kick, 35),
+            ("VK", vk_f, default_vk, 35),
+            ("YouTube", yt_f, default_yt, 45),
+        ]:
             try:
                 result = future.result(timeout=timeout_s)
                 if isinstance(result, dict) and "live" in result:
@@ -1398,9 +1482,12 @@ def fetch_all_platforms():
                         vk = result
                     else:
                         yt = result
+                else:
+                    log_line(f"Parallel {name} fetch returned invalid result: {result}")
             except Exception as e:
                 log_line(f"Parallel {name} fetch error: {e}")
     return kick, vk, yt
+
 
 def build_caption(prefix: str, st: dict, kick: dict, vk: dict, yt: dict = None) -> str:
     running = fmt_running_line(st)
@@ -1447,14 +1534,18 @@ def build_caption(prefix: str, st: dict, kick: dict, vk: dict, yt: dict = None) 
     lines.append(f"🔗 YouTube: {YOUTUBE_STREAMS_URL}")
     return "\n".join(lines)
 
+
 def build_end_text(st: dict) -> str:
     return build_end_report(st)
+
 
 def build_no_stream_text(prefix: str = "⚫ Патока сейчас нет") -> str:
     return "\n".join([prefix, "", f"🔗 Kick: {KICK_PUBLIC_URL}", f"🔗 VK Play: {VK_PUBLIC_URL}", f"🔗 YouTube: {YOUTUBE_STREAMS_URL}"])
 
+
 def set_started_at_from_kick(st: dict, kick: dict, force: bool = False) -> None:
     sync_kick_session(st, kick, force=force)
+
 
 def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None, yt: dict = None) -> None:
     caption = build_caption(prefix, st, kick, vk, yt)
@@ -1512,6 +1603,7 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
     tg_send_to(chat_id, thread_id, caption, reply_to=reply_to)
     maybe_send_to_pubg_topic(caption, st, kick)
 
+
 def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: bool, kick_cat_changed: bool, vk_title_changed: bool, vk_cat_changed: bool, yt: dict = None, yt_title_changed: bool = False) -> str:
     lines: list[str] = []
     changes = []
@@ -1563,6 +1655,7 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
     lines.append(f"🔗 {YOUTUBE_STREAMS_URL}")
     return "\n".join(lines)
 
+
 def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict, yt: dict = None) -> None:
     shot = None
     if kick.get("live"):
@@ -1597,6 +1690,7 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict, yt: d
     except Exception:
         pass
     tg_send_main_and_maybe_pubg(caption, st, kick)
+
 
 def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None, yt: dict = None) -> None:
     caption = build_caption(prefix, st, kick, vk, yt)
@@ -1637,8 +1731,10 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
         return
     tg_send_to_cmd(chat_id, thread_id, caption, reply_to=reply_to)
 
+
 def send_status_with_screen(prefix: str, st: dict, kick: dict, vk: dict, yt: dict = None) -> None:
     send_status_with_screen_to(prefix, st, kick, vk, GROUP_ID, TOPIC_ID, reply_to=None, yt=yt)
+
 
 def _age_str(sec: int) -> str:
     sec = int(sec or 0)
@@ -1647,13 +1743,15 @@ def _age_str(sec: int) -> str:
     if sec < 60:
         return f"{sec} сек"
     if sec < 3600:
-        return f"{sec//60} мин"
+        return f"{sec // 60} мин"
     h = sec // 3600
     m = (sec % 3600) // 60
     return f"{h} ч {m} мин"
 
+
 def _yes_no(v: bool) -> str:
     return "ДА" if v else "НЕТ"
+
 
 def build_admin_diag_text(st: dict, webhook_info: dict) -> str:
     now = ts()
@@ -1695,19 +1793,20 @@ def build_admin_diag_text(st: dict, webhook_info: dict) -> str:
         actions.append("ℹ️ Watchdog уже срабатывал — бот сам пытался починиться.")
     return ("Админ-проверка (простыми словами)\n\n"
             "Стрим сейчас:\n"
-            f"- Идёт ли стрим: {_yes_no(any_live)} (Kick: {_yes_no(kick_live)}, VK: {_yes_no(vk_live)}, YT: {_yes_no(yt_live)})\n"
+            f"- Идёт ли стрим: {_yes_no(any_live)} (Kick: {_yes_no(kick_live)}, VK: {_yes_no(vk_live)}, YouTube: {_yes_no(yt_live)})\n"
             f"- Время старта: {started_at}\n"
             f"- Подтверждений конца: {end_streak} (нужно {END_CONFIRM_STREAK})\n"
             f"- Переходный streak: {transition_streak} (порог: {TRANSITION_STREAK_THRESHOLD})\n\n"
             "Команды в Телеграм:\n"
             f"- Бот на связи: {on_air_icon} {on_air_text} (последний опрос: {_age_str(poll_age)} назад)\n"
-            f"- Последняя команда: {_age_str(cmd_age)} назад\n"
-            f"- Самовосстановление: {_age_str(rec_age)} назад\n\n"
+            f"- Последняя команда (/stream и т.п.): {_age_str(cmd_age)} назад\n"
+            f"- Самовосстановление (watchdog): {_age_str(rec_age)} назад\n\n"
             "Очередь сообщений Telegram:\n"
             f"- Webhook: {webhook_state}\n"
-            f"- В очереди: {esc(pend)}\n"
-            f"- Offset: {offset}\n\n"
+            f"- В очереди Telegram: {esc(pend)}\n"
+            f"- Указатель очереди (offset): {offset}\n\n"
             "Что делать:\n" + "\n".join(actions) + "\n")
+
 
 def is_status_command(text: str) -> bool:
     if not text:
@@ -1715,14 +1814,17 @@ def is_status_command(text: str) -> bool:
     t = text.strip().split()[0].split("@")[0]
     return t in STATUS_COMMANDS
 
+
 def is_private_chat(msg: dict) -> bool:
     ch = msg.get("chat") or {}
     return ch.get("type") == "private"
+
 
 def is_admin_msg(msg: dict) -> bool:
     fr = msg.get("from") or {}
     uid = fr.get("id")
     return isinstance(uid, int) and uid == ADMIN_ID
+
 
 def commands_loop_forever():
     while True:
@@ -1735,6 +1837,7 @@ def commands_loop_forever():
                 continue
             log_line(f"commands_loop_forever error: {e}\n{traceback.format_exc()[:1500]}")
             time.sleep(LOOP_CRASH_SLEEP)
+
 
 def commands_loop_once():
     if not COMMANDS_ENABLED:
@@ -1824,9 +1927,18 @@ def commands_loop_once():
             if snap is not None:
                 st_cur, kick, vk, yt, _age = snap
             else:
-                kick = kick_fetch()
-                vk = vk_fetch_best_effort()
-                yt = youtube_fetch()
+                try:
+                    kick = kick_fetch()
+                except Exception:
+                    kick = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
+                try:
+                    vk = vk_fetch_best_effort()
+                except Exception:
+                    vk = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
+                try:
+                    yt = youtube_fetch()
+                except Exception:
+                    yt = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
                 with STATE_LOCK:
                     st_cur = load_state()
                 st_cur["any_live"] = bool(kick.get("live") or vk.get("live") or yt.get("live"))
@@ -1836,7 +1948,17 @@ def commands_loop_once():
                 if st_cur["any_live"]:
                     set_started_at_from_kick(st_cur, kick)
                     st_cur["end_streak"] = 0
-                save_state(st_cur)
+                    st_cur["kick_title"] = kick.get("title")
+                    st_cur["kick_cat"] = kick.get("category")
+                    st_cur["vk_title"] = vk.get("title")
+                    st_cur["vk_cat"] = vk.get("category")
+                    st_cur["yt_title"] = yt.get("title")
+                    st_cur["yt_cat"] = yt.get("category")
+                    st_cur["kick_viewers"] = kick.get("viewers")
+                    st_cur["vk_viewers"] = vk.get("viewers")
+                    st_cur["yt_viewers"] = yt.get("viewers")
+                    st_cur["youtube_video_id"] = yt.get("video_id")
+                    save_state(st_cur)
             if not (kick.get("live") or vk.get("live") or yt.get("live")):
                 try:
                     tg_send_to(chat_id, thread_id, build_no_stream_text("Сейчас на канале Глад Валакас патока нет!"), reply_to=reply_to, with_buttons=False)
@@ -1854,6 +1976,7 @@ def commands_loop_once():
             st3 = load_state()
             st3["updates_offset"] = int(max_update_id) + 1
             save_state(st3)
+
 
 def commands_watchdog_forever():
     while True:
@@ -1885,6 +2008,7 @@ def commands_watchdog_forever():
             log_line(f"commands_watchdog error: {e}\n{traceback.format_exc()[:1200]}")
         time.sleep(10)
 
+
 def main_loop_forever():
     while True:
         try:
@@ -1892,6 +2016,7 @@ def main_loop_forever():
         except Exception as e:
             notify_admin_dedup("main_loop_crash", f"main_loop crashed: {e}\n{traceback.format_exc()[:1500]}")
             time.sleep(LOOP_CRASH_SLEEP)
+
 
 def main_loop():
     kick0, vk0, yt0 = fetch_all_platforms()
@@ -1954,6 +2079,7 @@ def main_loop():
         st["is_first_poll"] = True
         stats_tick(st, kick0, vk0, any_live0, now_ts=ts(), yt=yt0)
         save_state(st)
+
     with STATE_LOCK:
         st = load_state()
         ping_sent = bool(st.get("startup_ping_sent"))
@@ -1968,6 +2094,7 @@ def main_loop():
                 save_state(st)
         except Exception as e:
             log_line(f"Startup ping failed: {e}")
+
     if NO_STREAM_ON_START_MESSAGE and (not any_live0):
         with STATE_LOCK:
             st = load_state()
@@ -1981,6 +2108,7 @@ def main_loop():
                 st = load_state()
                 st["last_no_stream_start_ts"] = ts()
                 save_state(st)
+
     if BOOT_STATUS_ENABLED and any_live0:
         try:
             with STATE_LOCK:
@@ -2003,9 +2131,12 @@ def main_loop():
                     save_state(st)
         except Exception as e:
             log_line(f"Boot status send error: {e}")
+
     cleanup_counter = 0
+
     while True:
         kick, vk, yt = fetch_all_platforms()
+
         with STATE_LOCK:
             st = load_state()
             prev_any = bool(st.get("any_live"))
@@ -2021,9 +2152,7 @@ def main_loop():
             prev_transition_streak = int(st.get("transition_streak") or 0)
             prev_last_any_live_ts = int(st.get("last_any_live_ts") or 0)
             is_first_poll = bool(st.get("is_first_poll"))
-            prev_kick_offline_streak = int(st.get("kick_offline_streak") or 0)
             prev_vk_offline_streak = int(st.get("vk_offline_streak") or 0)
-            prev_yt_offline_streak = int(st.get("yt_offline_streak") or 0)
 
         any_live = bool(kick.get("live") or vk.get("live") or yt.get("live"))
         kick_live = bool(kick.get("live"))
@@ -2031,20 +2160,28 @@ def main_loop():
         yt_live = bool(yt.get("live"))
         current_ts = ts()
 
-        kick_offline_streak = (prev_kick_offline_streak + 1) if not kick_live else 0
-        vk_offline_streak = (prev_vk_offline_streak + 1) if not vk_live else 0
-        yt_offline_streak = (prev_yt_offline_streak + 1) if not yt_live else 0
+        # === VK OFFLINE GRACE PERIOD ===
+        vk_grace_polls = max(1, VK_OFFLINE_GRACE_SEC // POLL_INTERVAL)
+        if not vk_live and prev_vk_live:
+            vk_offline_streak = prev_vk_offline_streak + 1
+        elif vk_live:
+            vk_offline_streak = 0
+        else:
+            vk_offline_streak = prev_vk_offline_streak
 
-        kick_threshold = max(1, KICK_OFFLINE_GRACE_SEC // POLL_INTERVAL)
-        vk_threshold = max(1, VK_OFFLINE_GRACE_SEC // POLL_INTERVAL)
-        yt_threshold = max(1, YT_OFFLINE_GRACE_SEC // POLL_INTERVAL)
+        # Если VK пропал, но ещё не прошло достаточно времени — считаем что он жив
+        effective_vk_live = vk_live
+        if not vk_live and prev_vk_live and vk_offline_streak < vk_grace_polls:
+            effective_vk_live = True
+            log_line(f"VK offline streak={vk_offline_streak}/{vk_grace_polls}, suppressing (grace period)")
+        elif not vk_live and prev_vk_live and vk_offline_streak >= vk_grace_polls:
+            effective_vk_live = False
+            log_line(f"VK offline streak={vk_offline_streak} >= threshold, marking as offline")
 
-        effective_kick_live = kick_live if kick_offline_streak >= kick_threshold else (kick_live or prev_kick_live)
-        effective_vk_live = vk_live if vk_offline_streak >= vk_threshold else (vk_live or prev_vk_live)
-        effective_yt_live = yt_live if yt_offline_streak >= yt_threshold else (yt_live or prev_yt_live)
-        effective_any_live = bool(effective_kick_live or effective_vk_live or effective_yt_live)
+        # Пересчитываем any_live с учётом эффективного статуса VK
+        effective_any_live = bool(kick_live or effective_vk_live or yt_live)
 
-        log_line(f"POLL: K={kick_live}(eff:{effective_kick_live},str:{kick_offline_streak}), VK={vk_live}(eff:{effective_vk_live},str:{vk_offline_streak}), YT={yt_live}(eff:{effective_yt_live},str:{yt_offline_streak}), any={any_live}(eff:{effective_any_live})")
+        log_line(f"POLL: Kick={kick_live}, VK={vk_live}(eff:{effective_vk_live}), YT={yt_live}, any={any_live}(eff:{effective_any_live}) | Prev: any={prev_any}, K={prev_kick_live}, VK={prev_vk_live}, YT={prev_yt_live}, first_poll={is_first_poll}")
 
         # ===== SCENARIO 1: STREAM START =====
         if (not prev_any) and effective_any_live:
@@ -2055,24 +2192,8 @@ def main_loop():
             if current_ts - last >= START_DEDUP_SEC:
                 with STATE_LOCK:
                     st_start = load_state()
-                    old_started_at = st_start.get("started_at")
-                    old_stats = st_start.get("stream_stats")
                     reset_stream_session(st_start)
                     set_started_at_from_kick(st_start, kick, force=True)
-                    new_started_at = st_start.get("started_at")
-                    is_same_stream = False
-                    if old_started_at and new_started_at:
-                        try:
-                            dt_old = datetime.fromisoformat(str(old_started_at).replace('Z', '+00:00'))
-                            dt_new = datetime.fromisoformat(str(new_started_at).replace('Z', '+00:00'))
-                            if abs((dt_old - dt_new).total_seconds()) < 60:
-                                is_same_stream = True
-                        except Exception:
-                            pass
-                    if is_same_stream and isinstance(old_stats, dict):
-                        st_start["stream_stats"] = old_stats
-                        st_start["stream_stats"]["session_started_at"] = new_started_at
-                        st_start["stream_stats"]["last_tick_ts"] = current_ts
                     st_start["end_streak"] = 0
                     st_start["transition_streak"] = 0
                     st_start["last_any_live_ts"] = current_ts
@@ -2087,6 +2208,7 @@ def main_loop():
                     st_start["yt_viewers"] = yt.get("viewers")
                     st_start["youtube_video_id"] = yt.get("video_id")
                     st_start["is_first_poll"] = False
+                    st_start["vk_offline_streak"] = 0
                     save_state(st_start)
                 try:
                     with STATE_LOCK:
@@ -2105,29 +2227,36 @@ def main_loop():
         # ===== SCENARIO 2: PLATFORM TOGGLE =====
         elif effective_any_live and prev_any:
             if is_first_poll:
+                log_line(">>> SKIPPING changes on first poll (initialization)")
                 platform_changed = False
                 change_desc = []
             else:
                 platform_changed = False
                 change_desc = []
-                if effective_kick_live and not prev_kick_live:
+                if kick_live and not prev_kick_live:
                     platform_changed = True
                     change_desc.append("🎥 Kick запущен")
+                    log_line(">>> PLATFORM TOGGLE: Kick started <<<")
                 if effective_vk_live and not prev_vk_live:
                     platform_changed = True
                     change_desc.append("🎮 VK Play запущен")
-                if effective_yt_live and not prev_yt_live:
+                    log_line(">>> PLATFORM TOGGLE: VK Play started <<<")
+                if yt_live and not prev_yt_live:
                     platform_changed = True
                     change_desc.append("📺 YouTube запущен")
-                if not effective_kick_live and prev_kick_live:
+                    log_line(">>> PLATFORM TOGGLE: YouTube started <<<")
+                if not kick_live and prev_kick_live:
                     platform_changed = True
                     change_desc.append("🎥 Kick отключен")
+                    log_line(">>> PLATFORM TOGGLE: Kick stopped <<<")
                 if not effective_vk_live and prev_vk_live:
                     platform_changed = True
                     change_desc.append("🎮 VK Play отключен")
-                if not effective_yt_live and prev_yt_live:
+                    log_line(f">>> PLATFORM TOGGLE: VK Play stopped (streak={vk_offline_streak}) <<<")
+                if not yt_live and prev_yt_live:
                     platform_changed = True
                     change_desc.append("📺 YouTube отключен")
+                    log_line(">>> PLATFORM TOGGLE: YouTube stopped <<<")
             if platform_changed:
                 with STATE_LOCK:
                     st_toggle = load_state()
@@ -2143,7 +2272,7 @@ def main_loop():
                             st_update["last_platform_toggle_ts"] = current_ts
                             st_update["last_change_sent_ts"] = current_ts
                             save_state(st_update)
-                        log_line(f"SENT: Platform toggle: {change_desc}")
+                        log_line(f"SENT: Platform toggle notification: {change_desc}")
                     except Exception as e:
                         log_line(f"Platform toggle send error: {e}")
 
@@ -2154,17 +2283,17 @@ def main_loop():
             vk_title_changed = False
             vk_cat_changed = False
             yt_title_changed = False
-            if effective_kick_live and prev_kick_live:
+            if kick_live and prev_kick_live:
                 kick_title_changed = (str(kick.get("title") or "") != str(prev_kick_title or ""))
                 kick_cat_changed = (str(kick.get("category") or "") != str(prev_kick_cat or ""))
             if effective_vk_live and prev_vk_live:
                 vk_title_changed = (str(vk.get("title") or "") != str(prev_vk_title or ""))
                 vk_cat_changed = (str(vk.get("category") or "") != str(prev_vk_cat or ""))
-            if effective_yt_live and prev_yt_live:
+            if yt_live and prev_yt_live:
                 yt_title_changed = (str(yt.get("title") or "") != str(prev_yt_title or ""))
             changed = (kick_title_changed or kick_cat_changed or vk_title_changed or vk_cat_changed or yt_title_changed)
             if changed:
-                log_line(f">>> CHANGES: K_t={kick_title_changed}, K_c={kick_cat_changed}, V_t={vk_title_changed}, V_c={vk_cat_changed}, YT_t={yt_title_changed}")
+                log_line(f">>> CHANGES: K title={kick_title_changed}, K cat={kick_cat_changed}, V title={vk_title_changed}, V cat={vk_cat_changed}, YT title={yt_title_changed}")
                 with STATE_LOCK:
                     st_chg = load_state()
                     last = int(st_chg.get("last_change_sent_ts") or 0)
@@ -2181,6 +2310,8 @@ def main_loop():
                         log_line("SENT: Title/category change notification")
                     except Exception as e:
                         log_line(f"Change send error: {e}")
+        elif effective_any_live and is_first_poll:
+            log_line(">>> SKIPPING change detection on first poll")
 
         # ===== SCENARIO 4: STREAM END =====
         has_active_session = bool(st.get("started_at"))
@@ -2210,6 +2341,9 @@ def main_loop():
                 st_end = load_state()
                 st_end["end_streak"] = prev_end_streak + 1
                 save_state(st_end)
+        elif effective_any_live and not is_first_poll:
+            if prev_transition_streak > 0 or prev_end_streak > 0:
+                log_line(f">>> LIVE AGAIN: resetting all streaks (was trans={prev_transition_streak}, end={prev_end_streak})")
 
         should_send_end = False
         with STATE_LOCK:
@@ -2220,7 +2354,7 @@ def main_loop():
             confirmed_off = (not effective_any_live) and (cur_end_streak >= END_CONFIRM_STREAK) and bool(cur_started)
             if confirmed_off and (already_for != cur_started):
                 should_send_end = True
-                log_line(f">>> STREAM END CONFIRMED (streak: {cur_end_streak}/{END_CONFIRM_STREAK}) <<<")
+                log_line(f">>> STREAM END CONFIRMED (end_streak: {cur_end_streak}/{END_CONFIRM_STREAK}, session={cur_started}) <<<")
 
         if should_send_end:
             try:
@@ -2228,6 +2362,9 @@ def main_loop():
                     st_end = load_state()
                     stats_tick(st_end, kick, vk, any_live=False, now_ts=ts(), yt=yt)
                     stats_finalize_end(st_end, now_ts=ts())
+                    st_end["kick_viewers"] = st_end.get("kick_viewers") or kick.get("viewers")
+                    st_end["vk_viewers"] = st_end.get("vk_viewers") or vk.get("viewers")
+                    st_end["yt_viewers"] = st_end.get("yt_viewers") or yt.get("viewers")
                     st_end["end_sent_for_started_at"] = st_end.get("started_at")
                     st_end["end_sent_ts"] = ts()
                 end_text = build_end_text(st_end)
@@ -2257,6 +2394,7 @@ def main_loop():
                     st_end2["last_platform_toggle_ts"] = 0
                     st_end2["end_sent_for_started_at"] = None
                     st_end2["end_sent_ts"] = 0
+                    st_end2["vk_offline_streak"] = 0
                     save_state(st_end2)
                 log_line("SENT: Stream end notification with report")
             except Exception as e:
@@ -2266,12 +2404,10 @@ def main_loop():
         with STATE_LOCK:
             st = load_state()
             st["any_live"] = effective_any_live
-            st["kick_live"] = effective_kick_live
+            st["kick_live"] = kick_live
             st["vk_live"] = effective_vk_live
-            st["yt_live"] = effective_yt_live
-            st["kick_offline_streak"] = kick_offline_streak
+            st["yt_live"] = yt_live
             st["vk_offline_streak"] = vk_offline_streak
-            st["yt_offline_streak"] = yt_offline_streak
             if effective_any_live:
                 set_started_at_from_kick(st, kick)
                 st["end_streak"] = 0
@@ -2314,15 +2450,18 @@ def main_loop():
                 if top:
                     top_lines = "\n".join([f"- {fmt_bytes(sz)} — {path}" for sz, path in top])
                     top_text = "\n\nТоп файлов по размеру:\n" + top_lines
-                notify_admin_dedup("quota_high", f"⚠️ Квота диска почти заполнена.\nЗанято: {fmt_bytes(q_used)} из {fmt_bytes(q_total)} ({q_percent:.1f}%)." + top_text)
+                notify_admin_dedup("quota_high", f"⚠️ Квота диска почти заполнена.\nЗанято ботом: {fmt_bytes(q_used)} из {fmt_bytes(q_total)} ({q_percent:.1f}%)." + top_text)
                 cleanup_pycache()
                 cleanup_temp_files()
+                cleanup_old_state_backups()
                 with STATE_LOCK:
                     stq = load_state()
                     stq["last_quota_notify_ts"] = ts()
                     save_state(stq)
             cleanup_counter = 0
+
         time.sleep(POLL_INTERVAL)
+
 
 def screenshot_refresher_forever() -> None:
     while True:
@@ -2342,13 +2481,24 @@ def screenshot_refresher_forever() -> None:
                 img = screenshot_from_vk_page(VK_PUBLIC_URL)
                 if img:
                     _shot_cache_set(img)
+                if yt.get("live") and yt.get("thumb"):
+                    try:
+                        img = download_image(yt["thumb"])
+                        if img:
+                            _shot_cache_set(img)
+                    except Exception:
+                        pass
                 time.sleep(max(2, int(SHOT_REFRESH_SEC)))
         except Exception:
             time.sleep(3)
 
+
 def main():
-    log_line(f"[cfg] POLL_INTERVAL={POLL_INTERVAL} END_STREAK={END_CONFIRM_STREAK}")
-    log_line(f"[cfg] VK_OFFLINE_GRACE={VK_OFFLINE_GRACE_SEC}s KICK_OFFLINE_GRACE={KICK_OFFLINE_GRACE_SEC}s YT_OFFLINE_GRACE={YT_OFFLINE_GRACE_SEC}s")
+    log_line(f"[cfg] POLL_INTERVAL={POLL_INTERVAL} COMMAND_POLL_TIMEOUT={COMMAND_POLL_TIMEOUT} COMMAND_HTTP_TIMEOUT={COMMAND_HTTP_TIMEOUT}")
+    log_line(f"[cfg] START_DEDUP={START_DEDUP_SEC}s CHANGE_DEDUP={CHANGE_DEDUP_SEC}s TOGGLE_DEDUP={PLATFORM_TOGGLE_DEDUP_SEC}s END_STREAK={END_CONFIRM_STREAK}")
+    log_line(f"[cfg] TRANSITION_GRACE_PERIOD={TRANSITION_GRACE_PERIOD_SEC}s TRANSITION_STREAK_THRESHOLD={TRANSITION_STREAK_THRESHOLD}")
+    log_line(f"[cfg] SESSION_MAX_AGE_SEC={SESSION_MAX_AGE_SEC}s")
+    log_line(f"[cfg] VK_OFFLINE_GRACE_SEC={VK_OFFLINE_GRACE_SEC}s ({max(1, VK_OFFLINE_GRACE_SEC // POLL_INTERVAL)} polls)")
     cleanup_temp_files()
     cleanup_old_state_backups()
     tg_drop_pending_updates_safe()
@@ -2361,6 +2511,7 @@ def main():
         threading.Thread(target=commands_watchdog_forever, daemon=True).start()
     threading.Thread(target=screenshot_refresher_forever, daemon=True).start()
     main_loop_forever()
+
 
 if __name__ == "__main__":
     main()
