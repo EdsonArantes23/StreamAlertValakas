@@ -2016,6 +2016,7 @@ def main_loop_forever():
             time.sleep(LOOP_CRASH_SLEEP)
 
 def main_loop():
+    global VK_OFFLINE_STREAK
     # Initial fetch (all platforms in parallel)
     kick0, vk0, yt0 = fetch_all_platforms()
     
@@ -2160,7 +2161,17 @@ def main_loop():
     while True:
         # Fetch current data (all platforms in parallel)
         kick, vk, yt = fetch_all_platforms()
-        
+
+        # ===== ФИКС СПАМА ВК: игнорируем кратковременные пропадания =====
+        if not vk.get("live"):
+            VK_OFFLINE_STREAK += 1
+        else:
+            VK_OFFLINE_STREAK = 0
+        if VK_OFFLINE_STREAK < VK_OFFLINE_STREAK_THRESHOLD and not vk.get("live"):
+            log_line(f"VK offline streak={VK_OFFLINE_STREAK}/{VK_OFFLINE_STREAK_THRESHOLD}, treating as still live")
+            vk["live"] = True
+        # ===== КОНЕЦ ФИКСА =====
+
         # Load previous state for comparison
         with STATE_LOCK:
             st = load_state()
