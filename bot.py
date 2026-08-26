@@ -147,6 +147,12 @@ FFMPEG_CMD_TIMEOUT_SEC = int(os.getenv("FFMPEG_CMD_TIMEOUT_SEC", "8"))
 LOG_FILE = os.getenv("LOG_FILE", "bot_runtime.log")
 last_error_notify = {}
 
+# ===== ФИКС СПАМА ВК =====
+# Сколько опросов подряд ВК должен быть оффлайн, прежде чем бот напишет "отключен".
+# При POLL_INTERVAL=30: 4 = 120 сек, 10 = 300 сек, 13 = ~400 сек.
+VK_OFFLINE_STREAK_THRESHOLD = 4
+VK_OFFLINE_STREAK = 0
+
 def log_line(msg: str) -> None:
     msg = _mask_secrets(msg)
     ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
