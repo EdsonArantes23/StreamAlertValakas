@@ -48,6 +48,8 @@ VK_SLUG = os.getenv("VK_SLUG", "gladvalakas").strip()
 YOUTUBE_HANDLE = os.getenv("YOUTUBE_HANDLE", "GLADIATORPWNZ").strip()
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))
+PLATFORM_OFFLINE_GRACE_SEC = int(os.getenv("PLATFORM_OFFLINE_GRACE_SEC", "180"))
+VK_OFFLINE_GRACE_SEC = int(os.getenv("VK_OFFLINE_GRACE_SEC", "300"))
 STATE_FILE = os.getenv("STATE_FILE", "state.json")
 
 START_DEDUP_SEC = int(os.getenv("START_DEDUP_SEC", "120"))
@@ -94,7 +96,7 @@ FFMPEG_SCALE = os.getenv("FFMPEG_SCALE", "1280:-1").strip()
 MAX_TITLE_LEN = int(os.getenv("MAX_TITLE_LEN", "180"))
 MAX_GAME_LEN = int(os.getenv("MAX_GAME_LEN", "120"))
 
-END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "20"))
+END_CONFIRM_STREAK = int(os.getenv("END_CONFIRM_STREAK", "3"))
 TRANSITION_GRACE_PERIOD_SEC = int(os.getenv("TRANSITION_GRACE_PERIOD_SEC", "90"))
 TRANSITION_STREAK_THRESHOLD = int(os.getenv("TRANSITION_STREAK_THRESHOLD", "3"))
 
@@ -112,6 +114,7 @@ BOT_TOP_FILES = int(os.getenv("BOT_TOP_FILES", "5"))
 
 RECONNECT_WINDOW_SEC = int(os.getenv("RECONNECT_WINDOW_SEC", "900"))
 SESSION_MAX_AGE_SEC = int(os.getenv("SESSION_MAX_AGE_SEC", "7200"))
+NEW_STREAM_AFTER_GAP_SEC = int(os.getenv("NEW_STREAM_AFTER_GAP_SEC", "3600"))
 
 KICK_API_URL = f"https://kick.com/api/v1/channels/{KICK_SLUG}"
 KICK_PUBLIC_URL = f"https://kick.com/{KICK_SLUG}"
@@ -489,6 +492,7 @@ def parse_kick_created_at(s: str | None) -> datetime | None:
 
 def reset_stream_session(st: dict) -> None:
     """Полный сброс всех полей, связанных с текущим стримом"""
+    st["started_at"] = None
     st["stream_stats"] = None
     st["end_streak"] = 0
     st["end_sent_for_started_at"] = None
@@ -726,7 +730,7 @@ def notify_admin_dedup(key: str, text: str) -> None:
     notify_admin(text)
 
 def default_state() -> dict:
-    return {"any_live": False, "kick_live": False, "vk_live": False, "started_at": None, "startup_ping_sent": False, "kick_title": None, "kick_cat": None, "vk_title": None, "vk_cat": None, "kick_viewers": None, "vk_viewers": None, "last_start_sent_ts": 0, "last_change_sent_ts": 0, "last_platform_toggle_ts": 0, "last_boot_status_ts": 0, "last_no_stream_start_ts": 0, "updates_offset": 0, "last_command_seen_ts": 0, "last_commands_recover_ts": 0, "last_updates_poll_ts": 0, "end_streak": 0, "transition_streak": 0, "last_any_live_ts": 0, "end_sent_for_started_at": None, "end_sent_ts": 0, "last_409_notify_ts": 0, "admin_private_chat_id": 0, "last_disk_check_ts": 0, "last_temp_cleanup_ts": 0, "last_quota_notify_ts": 0, "stream_stats": None, "is_first_poll": True, "youtube_video_id": None}
+    return {"any_live": False, "kick_live": False, "vk_live": False, "started_at": None, "startup_ping_sent": False, "kick_title": None, "kick_cat": None, "vk_title": None, "vk_cat": None, "kick_viewers": None, "vk_viewers": None, "last_start_sent_ts": 0, "last_change_sent_ts": 0, "last_platform_toggle_ts": 0, "last_boot_status_ts": 0, "last_no_stream_start_ts": 0, "updates_offset": 0, "last_command_seen_ts": 0, "last_commands_recover_ts": 0, "last_updates_poll_ts": 0, "end_streak": 0, "transition_streak": 0, "last_any_live_ts": 0, "end_sent_for_started_at": None, "end_sent_ts": 0, "last_409_notify_ts": 0, "admin_private_chat_id": 0, "last_disk_check_ts": 0, "last_temp_cleanup_ts": 0, "last_quota_notify_ts": 0, "stream_stats": None, "is_first_poll": True, "youtube_video_id": None, "pending_toggles": []}
 
 def load_state() -> dict:
     if not os.path.exists(STATE_FILE):
@@ -1097,7 +1101,7 @@ def kick_fetch() -> dict:
         return {"live": is_live, "title": trim(title, MAX_TITLE_LEN), "category": trim(cat, MAX_GAME_LEN), "viewers": viewers, "thumb": thumb, "created_at": created_at, "playback_url": playback_url}
     except Exception as e:
         log_line(f"Kick fetch error: {e}")
-        return {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
+        return {"live": None, "error": str(e)}
 
 def _parse_vk_slot(slot: dict) -> dict | None:
     """Parse a single VK stream slot dict into our standard format."""
@@ -1134,7 +1138,7 @@ def _extract_vk_stream_data_from_json(html: str) -> dict | None:
         scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
         for raw in scripts:
             raw = raw.strip()
-            if len(raw) < 1000 or '"isOnline"' not in raw:
+            if '"isOnline"' not in raw:
                 continue
             try:
                 data = json.loads(raw)
@@ -1145,14 +1149,19 @@ def _extract_vk_stream_data_from_json(html: str) -> dict | None:
 
             stream_data = (((data.get("stream") or {}).get("stream") or {}).get("data") or {}).get("stream")
             result = _parse_vk_slot(stream_data) if isinstance(stream_data, dict) else None
-            if result is not None:
+            if result is not None and result["live"]:
                 return result
 
             slots = ((data.get("streamSlots") or {}).get("channelPage") or {}).get("data")
             if isinstance(slots, list) and slots:
-                result = _parse_vk_slot(slots[0])
-                if result is not None:
-                    return result
+                parsed = [_parse_vk_slot(slot) for slot in slots]
+                live_slot = next((slot for slot in parsed if slot and slot["live"]), None)
+                if live_slot:
+                    return live_slot
+                if any(slot is not None for slot in parsed):
+                    return next(slot for slot in parsed if slot is not None)
+            if result is not None:
+                return result
         return None
     except Exception as e:
         log_line(f"VK JSON parse error: {e}")
@@ -1202,7 +1211,10 @@ def vk_fetch_best_effort() -> dict:
                 found_online = True
                 break
         if not found_online:
-            return offline
+            # A changed or partially loaded page is not a confirmed offline signal.
+            if stream_json_matches:
+                return offline
+            return {"live": None, "error": "VK status marker missing"}
 
         viewers = None
         title = None
@@ -1247,7 +1259,7 @@ def vk_fetch_best_effort() -> dict:
 
     except Exception as e:
         log_line(f"VK fetch HTTP error: {e}")
-        return offline
+        return {"live": None, "error": str(e)}
 
 def youtube_fetch() -> dict:
     """Parse YouTube channel streams page - extracts live stream data from lockupViewModel."""
@@ -1442,13 +1454,13 @@ def youtube_fetch() -> dict:
 
     except Exception as e:
         log_line(f"YouTube fetch HTTP error: {e}")
-        return offline
+        return {"live": None, "error": str(e)}
 
 def fetch_all_platforms():
     """Fetch Kick, VK, YouTube in parallel to reduce poll cycle latency."""
-    default_kick = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "created_at": None, "playback_url": None}
-    default_vk = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None}
-    default_yt = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "video_id": None}
+    default_kick = {"live": None}
+    default_vk = {"live": None}
+    default_yt = {"live": None}
 
     with ThreadPoolExecutor(max_workers=3) as executor:
         kick_f = executor.submit(kick_fetch)
@@ -1479,6 +1491,44 @@ def fetch_all_platforms():
                 log_line(f"Parallel {name} fetch error: {e}")
 
     return kick, vk, yt
+
+def retain_unknown_platforms(kick: dict, vk: dict, yt: dict, st: dict):
+    """An unavailable website is not proof that its stream ended."""
+    result = []
+    for name, sample, key, title, cat, viewers in (
+        ("Kick", kick, "kick", "kick_title", "kick_cat", "kick_viewers"),
+        ("VK", vk, "vk", "vk_title", "vk_cat", "vk_viewers"),
+        ("YouTube", yt, "yt", "yt_title", "yt_cat", "yt_viewers"),
+    ):
+        if sample.get("live") is None:
+            log_line(f"{name} status unknown; preserving last confirmed state")
+            sample = {"live": bool(st.get(key + "_live")), "title": st.get(title),
+                      "category": st.get(cat), "viewers": st.get(viewers),
+                      "video_id": st.get("youtube_video_id") if key == "yt" else None,
+                      "unknown": True}
+        result.append(sample)
+    return tuple(result)
+
+def confirm_platform_status(kick: dict, vk: dict, yt: dict, st: dict, now_ts: int):
+    """Keep a live platform during a brief reconnect; commit offline only after a grace period."""
+    samples = [kick, vk, yt]
+    for sample, key, grace in zip(samples, ("kick", "vk", "yt"),
+                                   (PLATFORM_OFFLINE_GRACE_SEC, VK_OFFLINE_GRACE_SEC, PLATFORM_OFFLINE_GRACE_SEC)):
+        since_key = key + "_offline_since"
+        if sample.get("unknown"):
+            continue
+        if sample.get("live"):
+            st[since_key] = 0
+        elif st.get(key + "_live"):
+            since = int(st.get(since_key) or now_ts)
+            st[since_key] = since
+            if now_ts - since < grace:
+                sample.update(live=True, title=st.get(key + "_title"),
+                              category=st.get(key + "_cat"),
+                              viewers=st.get(key + "_viewers"), reconnecting=True)
+        else:
+            st[since_key] = 0
+    return tuple(samples)
 
 def build_caption(prefix: str, st: dict, kick: dict, vk: dict, yt: dict = None) -> str:
     running = fmt_running_line(st)
@@ -1534,6 +1584,22 @@ def build_no_stream_text(prefix: str = "⚫ Патока сейчас нет") -
 def set_started_at_from_kick(st: dict, kick: dict, force: bool = False) -> None:
     sync_kick_session(st, kick, force=force)
 
+def ensure_session_started(st: dict, kick: dict, any_live: bool, force: bool = False) -> None:
+    if not any_live:
+        return
+    if force or not st.get("started_at"):
+        set_started_at_from_kick(st, kick, force=force)
+    if not st.get("started_at"):
+        st["started_at"] = now_utc().isoformat()
+
+def is_new_after_restart(st: dict, any_live: bool, now_ts: int) -> bool:
+    if not any_live:
+        return False
+    if not st.get("started_at") or not st.get("any_live"):
+        return True
+    last_live = int(st.get("last_any_live_ts") or 0)
+    return bool(last_live and now_ts - last_live >= NEW_STREAM_AFTER_GAP_SEC)
+
 def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None, yt: dict = None) -> None:
     caption = build_caption(prefix, st, kick, vk, yt)
     tg_send_chat_action(chat_id, thread_id, "upload_photo")
@@ -1554,9 +1620,12 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
     
     # Если есть скриншот - отправляем его
     if shot:
-        tg_send_photo_upload_to(chat_id, thread_id, shot, caption, filename=f"live_{ts()}.jpg", reply_to=reply_to)
-        maybe_send_to_pubg_topic(caption, st, kick)
-        return
+        try:
+            tg_send_photo_upload_to(chat_id, thread_id, shot, caption, filename=f"live_{ts()}.jpg", reply_to=reply_to)
+            maybe_send_to_pubg_topic(caption, st, kick)
+            return
+        except Exception as e:
+            log_line(f"Screenshot send failed, trying text fallback: {e}")
     
     # Fallback: загружаем превью через download_image (более надежно)
     if kick.get("live") and kick.get("thumb"):
@@ -1586,17 +1655,26 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
     
     # Last fallback: URL фото (без загрузки)
     if kick.get("live") and kick.get("thumb"):
-        tg_send_photo_url_to(chat_id, thread_id, kick["thumb"], caption, reply_to=reply_to)
-        maybe_send_to_pubg_topic(caption, st, kick)
-        return
+        try:
+            tg_send_photo_url_to(chat_id, thread_id, kick["thumb"], caption, reply_to=reply_to)
+            maybe_send_to_pubg_topic(caption, st, kick)
+            return
+        except Exception as e:
+            log_line(f"Kick photo URL send failed: {e}")
     if vk.get("live") and vk.get("thumb"):
-        tg_send_photo_url_to(chat_id, thread_id, vk["thumb"], caption, reply_to=reply_to)
-        maybe_send_to_pubg_topic(caption, st, kick)
-        return
+        try:
+            tg_send_photo_url_to(chat_id, thread_id, vk["thumb"], caption, reply_to=reply_to)
+            maybe_send_to_pubg_topic(caption, st, kick)
+            return
+        except Exception as e:
+            log_line(f"VK photo URL send failed: {e}")
     if yt is not None and yt.get("live") and yt.get("thumb"):
-        tg_send_photo_url_to(chat_id, thread_id, yt["thumb"], caption, reply_to=reply_to)
-        maybe_send_to_pubg_topic(caption, st, kick)
-        return
+        try:
+            tg_send_photo_url_to(chat_id, thread_id, yt["thumb"], caption, reply_to=reply_to)
+            maybe_send_to_pubg_topic(caption, st, kick)
+            return
+        except Exception as e:
+            log_line(f"YouTube photo URL send failed: {e}")
     
     # Вообще без картинки
     tg_send_to(chat_id, thread_id, caption, reply_to=reply_to)
@@ -1940,7 +2018,7 @@ def commands_loop_once():
                 st_cur["vk_live"] = bool(vk.get("live"))
                 st_cur["yt_live"] = bool(yt.get("live"))
                 if st_cur["any_live"]:
-                    set_started_at_from_kick(st_cur, kick)
+                    ensure_session_started(st_cur, kick, bool(kick.get("live") or vk.get("live") or yt.get("live")))
                     st_cur["end_streak"] = 0
                 st_cur["kick_title"] = kick.get("title")
                 st_cur["kick_cat"] = kick.get("category")
@@ -2012,79 +2090,69 @@ def main_loop_forever():
 def main_loop():
     # Initial fetch (all platforms in parallel)
     kick0, vk0, yt0 = fetch_all_platforms()
+    with STATE_LOCK:
+        previous_boot_state = load_state()
+    last_seen = int(previous_boot_state.get("last_any_live_ts") or 0)
+    stale_boot = bool(last_seen and ts() - last_seen >= NEW_STREAM_AFTER_GAP_SEC)
+    status_baseline = dict(previous_boot_state)
+    if stale_boot:
+        # Do not extend yesterday's live flags with a new reconnect grace period.
+        for key in ("kick", "vk", "yt"):
+            status_baseline[key + "_live"] = False
+            status_baseline[key + "_offline_since"] = 0
+    initial_unknown = any(p.get("live") is None for p in (kick0, vk0, yt0))
+    kick0, vk0, yt0 = retain_unknown_platforms(kick0, vk0, yt0, status_baseline)
+    kick0, vk0, yt0 = confirm_platform_status(kick0, vk0, yt0, status_baseline, ts())
     
     any_live0 = bool(kick0.get("live") or vk0.get("live") or yt0.get("live"))
     
     log_line(f"INIT: Kick live={kick0.get('live')}, VK live={vk0.get('live')}, YT live={yt0.get('live')}, any_live={any_live0}")
     
     # Флаг: является ли этот стрим "новым" с точки зрения бота
-    is_new_stream = False
+    is_new_stream = is_new_after_restart(previous_boot_state, any_live0, ts())
     
     # Инициализация состояния с проверкой старой сессии
     with STATE_LOCK:
         st = load_state()
+        for key in ("kick", "vk", "yt"):
+            st[key + "_offline_since"] = status_baseline.get(key + "_offline_since", 0)
         
-        # ПРОВЕРКА: была ли ранее активная сессия
-        had_active_session = bool(st.get("started_at"))
-        
-        # Если стрим есть сейчас, но в сохраненном состоянии его нет -
-        # это новый стрим (или бот перезапустился во время стрима)
-        if any_live0 and not had_active_session:
-            is_new_stream = True
-            log_line(f"INIT: New stream detected (had no active session)")
-        elif any_live0 and had_active_session:
-            # Стрим есть и была сессия - проверяем возраст
-            started_at_str = st.get("started_at")
-            try:
-                started_dt = datetime.fromisoformat(started_at_str)
-                age_sec = (now_utc() - started_dt).total_seconds()
-                if age_sec > SESSION_MAX_AGE_SEC:
-                    log_line(f"INIT: Old session expired ({fmt_duration(int(age_sec))}), treating as new stream")
-                    is_new_stream = True
-                else:
-                    log_line(f"INIT: Continuing existing session ({fmt_duration(int(age_sec))} old)")
-            except Exception:
-                is_new_stream = True
-        
-        # Сброс старой сессии если нужно
-        if is_new_stream or not any_live0:
-            if started_at_str := st.get("started_at"):
-                try:
-                    started_dt = datetime.fromisoformat(started_at_str)
-                    age_sec = (now_utc() - started_dt).total_seconds()
-                    if age_sec > SESSION_MAX_AGE_SEC or not any_live0:
-                        log_line(f"INIT: Force resetting state (age={fmt_duration(int(age_sec))}, any_live={any_live0})")
-                        reset_stream_session(st)
-                        st["started_at"] = None
-                        st["any_live"] = False
-                        st["kick_live"] = False
-                        st["vk_live"] = False
-                        st["yt_live"] = False
-                except Exception:
-                    pass
+        if is_new_stream:
+            log_line("INIT: New stream after offline gap or missing active session")
+            reset_stream_session(st)
+            st["pending_toggles"] = []
+        elif stale_boot and not any_live0 and not initial_unknown:
+            reset_stream_session(st)
+            st["any_live"] = False
+            for key in ("kick", "vk", "yt"):
+                st[key + "_live"] = False
         
         # Устанавливаем текущее состояние
-        st["any_live"] = any_live0
-        st["kick_live"] = bool(kick0.get("live"))
-        st["vk_live"] = bool(vk0.get("live"))
-        st["yt_live"] = bool(yt0.get("live"))
+        if any_live0:
+            st["any_live"] = True
+            st["kick_live"] = bool(kick0.get("live"))
+            st["vk_live"] = bool(vk0.get("live"))
+            st["yt_live"] = bool(yt0.get("live"))
         
         if any_live0:
-            set_started_at_from_kick(st, kick0)
+            ensure_session_started(st, kick0, any_live0)
+            if is_new_stream:
+                st["pending_start"] = True
             st["end_streak"] = 0
             st["transition_streak"] = 0
             st["last_any_live_ts"] = ts()
         
-        st["kick_title"] = kick0.get("title")
-        st["kick_cat"] = kick0.get("category")
-        st["vk_title"] = vk0.get("title")
-        st["vk_cat"] = vk0.get("category")
-        st["yt_title"] = yt0.get("title")
-        st["yt_cat"] = yt0.get("category")
-        st["kick_viewers"] = kick0.get("viewers")
-        st["vk_viewers"] = vk0.get("viewers")
-        st["yt_viewers"] = yt0.get("viewers")
-        st["youtube_video_id"] = yt0.get("video_id")
+        if any_live0:
+            st["kick_title"] = kick0.get("title")
+            st["kick_cat"] = kick0.get("category")
+            st["vk_title"] = vk0.get("title")
+            st["vk_cat"] = vk0.get("category")
+            st["yt_title"] = yt0.get("title")
+            st["yt_cat"] = yt0.get("category")
+            st["kick_viewers"] = kick0.get("viewers")
+            st["vk_viewers"] = vk0.get("viewers")
+            st["yt_viewers"] = yt0.get("viewers")
+            st["youtube_video_id"] = yt0.get("video_id")
         
         # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: маркируем первую итерацию
         st["is_first_poll"] = True
@@ -2108,23 +2176,8 @@ def main_loop():
         except Exception as e:
             log_line(f"Startup ping failed: {e}")
     
-    # No stream on start message
-    if NO_STREAM_ON_START_MESSAGE and (not any_live0):
-        with STATE_LOCK:
-            st = load_state()
-            last_ts = int(st.get("last_no_stream_start_ts") or 0)
-        if ts() - last_ts >= NO_STREAM_START_DEDUP_SEC:
-            try:
-                tg_send_to(GROUP_ID, TOPIC_ID, build_no_stream_text("Сейчас на канале Глад Валакас патока нет!"), reply_to=None, with_buttons=False)
-            except Exception as e:
-                log_line(f"No-stream-on-start send error: {e}")
-            with STATE_LOCK:
-                st = load_state()
-                st["last_no_stream_start_ts"] = ts()
-                save_state(st)
-    
     # Boot status if already streaming
-    if BOOT_STATUS_ENABLED and any_live0:
+    if BOOT_STATUS_ENABLED and any_live0 and not initial_unknown:
         try:
             with STATE_LOCK:
                 st = load_state()
@@ -2144,6 +2197,7 @@ def main_loop():
                         st["last_start_sent_ts"] = ts()
                         st["last_change_sent_ts"] = ts()
                         st["last_platform_toggle_ts"] = ts()
+                        st["pending_start"] = False
                     save_state(st)
         except Exception as e:
             log_line(f"Boot status send error: {e}")
@@ -2171,9 +2225,17 @@ def main_loop():
             prev_transition_streak = int(st.get("transition_streak") or 0)
             prev_last_any_live_ts = int(st.get("last_any_live_ts") or 0)
             is_first_poll = bool(st.get("is_first_poll"))
+        kick, vk, yt = retain_unknown_platforms(kick, vk, yt, st)
+        kick, vk, yt = confirm_platform_status(kick, vk, yt, st, ts())
+        with STATE_LOCK:
+            current_state = load_state()
+            for key in ("kick", "vk", "yt"):
+                current_state[key + "_offline_since"] = st.get(key + "_offline_since", 0)
+            save_state(current_state)
         
         # Current status
         any_live = bool(kick.get("live") or vk.get("live") or yt.get("live"))
+        all_platforms_known = not any(p.get("unknown") for p in (kick, vk, yt))
         kick_live = bool(kick.get("live"))
         vk_live = bool(vk.get("live"))
         yt_live = bool(yt.get("live"))
@@ -2182,45 +2244,44 @@ def main_loop():
         log_line(f"POLL: Kick={kick_live}, VK={vk_live}, YT={yt_live}, any={any_live} | Prev: any={prev_any}, K={prev_kick_live}, VK={prev_vk_live}, YT={prev_yt_live}, streak={prev_end_streak}, trans_streak={prev_transition_streak}, first_poll={is_first_poll}")
         
         # ===== SCENARIO 1: STREAM START =====
-        if (not prev_any) and any_live:
+        if ((not prev_any) or st.get("pending_start")) and any_live:
             log_line(f">>> STREAM START DETECTED <<<")
             with STATE_LOCK:
                 st_start = load_state()
-                last = int(st_start.get("last_start_sent_ts") or 0)
-            if current_ts - last >= START_DEDUP_SEC:
-                with STATE_LOCK:
-                    st_start = load_state()
+                if not st_start.get("pending_start"):
                     reset_stream_session(st_start)
-                    set_started_at_from_kick(st_start, kick, force=True)
-                    st_start["end_streak"] = 0
-                    st_start["transition_streak"] = 0
-                    st_start["last_any_live_ts"] = current_ts
-                    st_start["kick_title"] = kick.get("title")
-                    st_start["kick_cat"] = kick.get("category")
-                    st_start["vk_title"] = vk.get("title")
-                    st_start["vk_cat"] = vk.get("category")
-                    st_start["yt_title"] = yt.get("title")
-                    st_start["yt_cat"] = yt.get("category")
-                    st_start["kick_viewers"] = kick.get("viewers")
-                    st_start["vk_viewers"] = vk.get("viewers")
-                    st_start["yt_viewers"] = yt.get("viewers")
-                    st_start["youtube_video_id"] = yt.get("video_id")
-                    st_start["is_first_poll"] = False
-                    save_state(st_start)
-                try:
-                    with STATE_LOCK:
-                        st_send = load_state()
-                    send_status_with_screen("🚨🚨 🧩 Глад Валакас запустил паток! 🚨🚨", st_send, kick, vk, yt=yt)
-                    with STATE_LOCK:
-                        st_update = load_state()
-                        st_update["last_start_sent_ts"] = current_ts
-                        st_update["last_change_sent_ts"] = current_ts
-                        st_update["last_platform_toggle_ts"] = current_ts
-                        save_state(st_update)
-                    log_line("SENT: Stream start notification")
-                except Exception as e:
-                    log_line(f"Start send error: {e}")
-        
+                    ensure_session_started(st_start, kick, any_live, force=True)
+                st_start["pending_start"] = True
+                st_start["end_streak"] = 0
+                st_start["transition_streak"] = 0
+                st_start["last_any_live_ts"] = current_ts
+                st_start["kick_title"] = kick.get("title")
+                st_start["kick_cat"] = kick.get("category")
+                st_start["vk_title"] = vk.get("title")
+                st_start["vk_cat"] = vk.get("category")
+                st_start["yt_title"] = yt.get("title")
+                st_start["yt_cat"] = yt.get("category")
+                st_start["kick_viewers"] = kick.get("viewers")
+                st_start["vk_viewers"] = vk.get("viewers")
+                st_start["yt_viewers"] = yt.get("viewers")
+                st_start["youtube_video_id"] = yt.get("video_id")
+                st_start["is_first_poll"] = False
+                save_state(st_start)
+            try:
+                with STATE_LOCK:
+                    st_send = load_state()
+                send_status_with_screen("🚨🚨 🧩 Глад Валакас запустил паток! 🚨🚨", st_send, kick, vk, yt=yt)
+                with STATE_LOCK:
+                    st_update = load_state()
+                    st_update["last_start_sent_ts"] = current_ts
+                    st_update["last_change_sent_ts"] = current_ts
+                    st_update["last_platform_toggle_ts"] = current_ts
+                    st_update["pending_start"] = False
+                    save_state(st_update)
+                log_line("SENT: Stream start notification")
+            except Exception as e:
+                log_line(f"Start send error: {e}")
+    
         # ===== SCENARIO 2: PLATFORM TOGGLE =====
         elif any_live and prev_any:
             # Пропускаем изменение категории/названия на первой итерации
@@ -2266,19 +2327,29 @@ def main_loop():
             if platform_changed:
                 with STATE_LOCK:
                     st_toggle = load_state()
-                    last = int(st_toggle.get("last_platform_toggle_ts") or 0)
-                if current_ts - last >= PLATFORM_TOGGLE_DEDUP_SEC:
+                    pending = list(st_toggle.get("pending_toggles") or [])
+                    for desc in change_desc:
+                        if desc not in pending:
+                            pending.append(desc)
+                    st_toggle["pending_toggles"] = pending
+                    save_state(st_toggle)
+            with STATE_LOCK:
+                st_toggle = load_state()
+                last = int(st_toggle.get("last_platform_toggle_ts") or 0)
+                pending = list(st_toggle.get("pending_toggles") or [])
+            if pending and current_ts - last >= PLATFORM_TOGGLE_DEDUP_SEC:
                     try:
                         with STATE_LOCK:
                             st_toggle = load_state()
-                        prefix = f"🔄 {' • '.join(change_desc)}"
+                        prefix = f"🔄 {' • '.join(pending)}"
                         send_status_with_screen(prefix, st_toggle, kick, vk, yt=yt)
                         with STATE_LOCK:
                             st_update = load_state()
                             st_update["last_platform_toggle_ts"] = current_ts
                             st_update["last_change_sent_ts"] = current_ts
+                            st_update["pending_toggles"] = []
                             save_state(st_update)
-                        log_line(f"SENT: Platform toggle notification: {change_desc}")
+                        log_line(f"SENT: Platform toggle notification: {pending}")
                     except Exception as e:
                         log_line(f"Platform toggle send error: {e}")
         
@@ -2327,7 +2398,13 @@ def main_loop():
         # ===== SCENARIO 4: STREAM END с переходным периодом =====
         has_active_session = bool(st.get("started_at"))
         
-        if not any_live and prev_any and has_active_session:
+        if not any_live and not all_platforms_known:
+            with STATE_LOCK:
+                st_end = load_state()
+                st_end["end_streak"] = 0
+                st_end["transition_streak"] = 0
+                save_state(st_end)
+        elif not any_live and prev_any and has_active_session:
             time_since_live = current_ts - prev_last_any_live_ts if prev_last_any_live_ts else 999999
             
             if time_since_live < TRANSITION_GRACE_PERIOD_SEC:
@@ -2374,7 +2451,7 @@ def main_loop():
             cur_started = st_chk.get("started_at")
             already_for = st_chk.get("end_sent_for_started_at")
             cur_end_streak = int(st_chk.get("end_streak") or 0)
-            confirmed_off = (not any_live) and (cur_end_streak >= END_CONFIRM_STREAK) and bool(cur_started)
+            confirmed_off = (not any_live) and all_platforms_known and (cur_end_streak >= END_CONFIRM_STREAK) and bool(cur_started)
             if confirmed_off and (already_for != cur_started):
                 should_send_end = True
                 log_line(f">>> STREAM END CONFIRMED (end_streak: {cur_end_streak}/{END_CONFIRM_STREAK}, session={cur_started}) <<<")
@@ -2415,6 +2492,8 @@ def main_loop():
                     st_end2["last_any_live_ts"] = 0
                     st_end2["last_change_sent_ts"] = 0
                     st_end2["last_platform_toggle_ts"] = 0
+                    st_end2["pending_toggles"] = []
+                    st_end2["pending_start"] = False
                     st_end2["end_sent_for_started_at"] = None
                     st_end2["end_sent_ts"] = 0
                     save_state(st_end2)
@@ -2431,7 +2510,7 @@ def main_loop():
             st["yt_live"] = yt_live
             
             if any_live:
-                set_started_at_from_kick(st, kick)
+                ensure_session_started(st, kick, any_live)
                 st["end_streak"] = 0
                 st["transition_streak"] = 0
                 st["last_any_live_ts"] = current_ts
