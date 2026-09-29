@@ -88,6 +88,7 @@ TG_BACKOFF_MAX = float(os.getenv("TG_BACKOFF_MAX", "4"))
 LOOP_CRASH_SLEEP = int(os.getenv("LOOP_CRASH_SLEEP", "2"))
 
 FFMPEG_ENABLED = os.getenv("FFMPEG_ENABLED", "1").strip() not in {"0", "false", "False"}
+VK_PREVIEW_FALLBACK = os.getenv("VK_PREVIEW_FALLBACK", "0").strip() in {"1", "true", "True"}
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg").strip()
 FFMPEG_TIMEOUT_SEC = int(os.getenv("FFMPEG_TIMEOUT_SEC", "18"))
 FFMPEG_SEEK_SEC = float(os.getenv("FFMPEG_SEEK_SEC", "3"))
@@ -119,6 +120,7 @@ NEW_STREAM_AFTER_GAP_SEC = int(os.getenv("NEW_STREAM_AFTER_GAP_SEC", "3600"))
 KICK_API_URL = f"https://kick.com/api/v1/channels/{KICK_SLUG}"
 KICK_PUBLIC_URL = f"https://kick.com/{KICK_SLUG}"
 VK_PUBLIC_URL = f"https://live.vkvideo.ru/{VK_SLUG}"
+VK_VIDEO_API_URL = f"https://api.live.vkvideo.ru/v1/blog/{VK_SLUG}/public_video_stream"
 YOUTUBE_STREAMS_URL = f"https://www.youtube.com/@{YOUTUBE_HANDLE}/streams"
 YOUTUBE_CHANNEL_URL = f"https://www.youtube.com/@{YOUTUBE_HANDLE}"
 
@@ -1048,10 +1050,44 @@ def screenshot_from_m3u8_fresh(playback_url: str) -> bytes | None:
     except Exception:
         return None
 
+def vk_live_hls_url(payload: dict) -> str | None:
+    """Find the current live HLS URL in VK Video Live's player response."""
+    streams = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(streams, list):
+        return None
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        for player in stream.get("playerUrls") or []:
+            if isinstance(player, dict) and player.get("type") == "live_hls":
+                url = player.get("url")
+                if isinstance(url, str) and url.startswith(("https://", "http://")):
+                    return url
+    return None
+
 def screenshot_from_vk_page(page_url: str) -> bytes | None:
-    """Get screenshot from VK Video page using ffmpeg with HLS stream detection."""
+    """Capture a real video frame from VK's live HLS player URL."""
     if not FFMPEG_ENABLED or not page_url or not ffmpeg_available():
         return None
+    try:
+        api_headers = dict(HEADERS_JSON)
+        api_headers["Referer"] = page_url
+        response = http_request_ext("GET", VK_VIDEO_API_URL, headers=api_headers, timeout=15)
+        playback_url = vk_live_hls_url(response.json())
+        if playback_url:
+            cmd = [FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-nostdin",
+                   "-user_agent", UA, "-headers", f"Referer: {page_url}\r\n",
+                   "-i", playback_url, "-frames:v", "1", "-vf", f"scale={FFMPEG_SCALE}",
+                   "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
+            shot = subprocess.run(cmd, capture_output=True, timeout=FFMPEG_TIMEOUT_SEC)
+            if shot.returncode == 0 and shot.stdout:
+                _shot_cache_set(shot.stdout)
+                return shot.stdout
+            log_line(f"VK HLS frame failed (ffmpeg exit {shot.returncode})")
+        else:
+            log_line("VK live player has no live_hls URL")
+    except Exception as e:
+        log_line(f"VK live player API error: {e}")
     try:
         headers = dict(HEADERS_HTML)
         headers.update({"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"})
@@ -1636,7 +1672,7 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
             return
         except Exception:
             pass
-    if vk.get("live") and vk.get("thumb"):
+    if VK_PREVIEW_FALLBACK and vk.get("live") and vk.get("thumb"):
         try:
             img = download_image(vk["thumb"])
             tg_send_photo_upload_to(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
@@ -1661,7 +1697,7 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
             return
         except Exception as e:
             log_line(f"Kick photo URL send failed: {e}")
-    if vk.get("live") and vk.get("thumb"):
+    if VK_PREVIEW_FALLBACK and vk.get("live") and vk.get("thumb"):
         try:
             tg_send_photo_url_to(chat_id, thread_id, vk["thumb"], caption, reply_to=reply_to)
             maybe_send_to_pubg_topic(caption, st, kick)
@@ -1768,7 +1804,7 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict, yt: d
             tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=None)
             maybe_send_to_pubg_topic(caption, st, kick)
             return
-        if vk.get("live") and vk.get("thumb"):
+        if VK_PREVIEW_FALLBACK and vk.get("live") and vk.get("thumb"):
             img = download_image(vk["thumb"])
             tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=None)
             maybe_send_to_pubg_topic(caption, st, kick)
@@ -1807,7 +1843,7 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
         except Exception:
             tg_send_photo_url_to_cmd(chat_id, thread_id, kick.get("thumb"), caption, reply_to=reply_to)
         return
-    if vk.get("live") and vk.get("thumb"):
+    if VK_PREVIEW_FALLBACK and vk.get("live") and vk.get("thumb"):
         try:
             img = download_image(vk.get("thumb"))
             tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
