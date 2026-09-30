@@ -12,6 +12,9 @@ import glob
 from datetime import datetime, timezone, timedelta
 from html import escape as html_escape
 import requests
+from youtube_monitor import parse_streams_page, parse_live_player_page
+
+BOT_BUILD = "2026.09.30-youtube-inline"
 
 # ========== CONFIG (ENV) ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -881,16 +884,16 @@ def tg_send_chat_action(chat_id: int, thread_id: int | None, action: str) -> Non
     except Exception:
         pass
 
-def get_platform_keyboard() -> dict:
+def get_platform_keyboard(youtube_video_id: str | None = None) -> dict:
     yt_url = YOUTUBE_STREAMS_URL
-    try:
-        with STATE_LOCK:
-            st = load_state()
-            vid = st.get("youtube_video_id")
-            if vid:
-                yt_url = f"https://www.youtube.com/watch?v={vid}"
-    except Exception:
-        pass
+    if youtube_video_id is None:
+        try:
+            with STATE_LOCK:
+                youtube_video_id = load_state().get("youtube_video_id")
+        except Exception:
+            pass
+    if youtube_video_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", youtube_video_id):
+        yt_url = f"https://www.youtube.com/watch?v={youtube_video_id}"
     return {
         "inline_keyboard": [
             [
@@ -901,50 +904,52 @@ def get_platform_keyboard() -> dict:
         ]
     }
 
-def tg_send_to(chat_id: int, thread_id: int | None, text: str, reply_to: int | None = None, with_buttons: bool = True) -> int:
+def tg_send_to(chat_id: int, thread_id: int | None, text: str, reply_to: int | None = None, with_buttons: bool = True, youtube_video_id: str | None = None) -> int:
     payload = {"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True, "parse_mode": "HTML"}
     if thread_id is not None:
         payload["message_thread_id"] = int(thread_id)
     if reply_to is not None:
         payload["reply_to_message_id"] = int(reply_to)
     if with_buttons:
-        payload["reply_markup"] = get_platform_keyboard()
+        payload["reply_markup"] = get_platform_keyboard(youtube_video_id)
     res = tg_call("sendMessage", payload, timeout=(5, 15))
     return int(res["message_id"])
 
-def tg_send(text: str) -> int:
-    return tg_send_to(GROUP_ID, TOPIC_ID, text, reply_to=None)
+def tg_send(text: str, youtube_video_id: str | None = None) -> int:
+    return tg_send_to(GROUP_ID, TOPIC_ID, text, reply_to=None, youtube_video_id=youtube_video_id)
 
-def maybe_send_to_pubg_topic(text: str, st: dict, kick: dict) -> None:
+def maybe_send_to_pubg_topic(text: str, st: dict, kick: dict, youtube_video_id: str | None = None) -> None:
     try:
         cat = (kick or {}).get("category")
         if cat and cat.strip() == PUBG_CATEGORY_MATCH:
-            tg_send_to(PUBG_DUPLICATE_CHAT_ID, PUBG_DUPLICATE_TOPIC_ID, text, reply_to=None)
+            video_id = st.get("youtube_video_id") if youtube_video_id is None else youtube_video_id
+            tg_send_to(PUBG_DUPLICATE_CHAT_ID, PUBG_DUPLICATE_TOPIC_ID, text, reply_to=None, youtube_video_id=video_id or "")
     except Exception as e:
         log_line(f"PUBG duplicate send error: {e}")
 
-def tg_send_main_and_maybe_pubg(text: str, st: dict, kick: dict) -> None:
-    tg_send(text)
-    maybe_send_to_pubg_topic(text, st, kick)
+def tg_send_main_and_maybe_pubg(text: str, st: dict, kick: dict, youtube_video_id: str | None = None) -> None:
+    video_id = st.get("youtube_video_id") if youtube_video_id is None else youtube_video_id
+    tg_send(text, youtube_video_id=video_id or "")
+    maybe_send_to_pubg_topic(text, st, kick, youtube_video_id=video_id or "")
 
-def tg_send_photo_url_to(chat_id: int, thread_id: int | None, photo_url: str, caption: str, reply_to: int | None = None) -> int:
+def tg_send_photo_url_to(chat_id: int, thread_id: int | None, photo_url: str, caption: str, reply_to: int | None = None, youtube_video_id: str | None = None) -> int:
     payload = {"chat_id": chat_id, "photo": bust(photo_url), "caption": caption[:1024], "parse_mode": "HTML"}
     if thread_id is not None:
         payload["message_thread_id"] = int(thread_id)
     if reply_to is not None:
         payload["reply_to_message_id"] = int(reply_to)
-    payload["reply_markup"] = get_platform_keyboard()
+    payload["reply_markup"] = get_platform_keyboard(youtube_video_id)
     res = tg_call("sendPhoto", payload, timeout=(5, 25))
     return int(res["message_id"])
 
-def tg_send_photo_upload_to(chat_id: int, thread_id: int | None, image_bytes: bytes, caption: str, filename: str, reply_to: int | None = None) -> int:
+def tg_send_photo_upload_to(chat_id: int, thread_id: int | None, image_bytes: bytes, caption: str, filename: str, reply_to: int | None = None, youtube_video_id: str | None = None) -> int:
     url = tg_api_url("sendPhoto")
     data = {"chat_id": str(chat_id), "caption": caption[:1024], "parse_mode": "HTML"}
     if thread_id is not None:
         data["message_thread_id"] = str(thread_id)
     if reply_to is not None:
         data["reply_to_message_id"] = str(reply_to)
-    data["reply_markup"] = json.dumps(get_platform_keyboard())
+    data["reply_markup"] = json.dumps(get_platform_keyboard(youtube_video_id))
     files = {"photo": (filename, image_bytes)}
     r = http_request_tg("POST", url, data=data, files=files, timeout=(10, 45))
     out = r.json()
@@ -966,34 +971,34 @@ def tg_send_photo_best_to(chat_id: int, thread_id: int | None, photo_url: str, c
         log_line(f"Photo upload fallback to URL. Reason: {e}")
         return tg_send_photo_url_to(chat_id, thread_id, photo_url, caption, reply_to=reply_to)
 
-def tg_send_to_cmd(chat_id: int, thread_id: int | None, text: str, reply_to: int | None = None) -> int:
+def tg_send_to_cmd(chat_id: int, thread_id: int | None, text: str, reply_to: int | None = None, youtube_video_id: str | None = None) -> int:
     payload = {"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True, "parse_mode": "HTML"}
     if thread_id is not None:
         payload["message_thread_id"] = int(thread_id)
     if reply_to is not None:
         payload["reply_to_message_id"] = int(reply_to)
-    payload["reply_markup"] = get_platform_keyboard()
+    payload["reply_markup"] = get_platform_keyboard(youtube_video_id)
     res = tg_call("sendMessage", payload, timeout=(4, TG_CMD_SEND_TIMEOUT_SEC))
     return int(res["message_id"])
 
-def tg_send_photo_url_to_cmd(chat_id: int, thread_id: int | None, photo_url: str, caption: str, reply_to: int | None = None) -> int:
+def tg_send_photo_url_to_cmd(chat_id: int, thread_id: int | None, photo_url: str, caption: str, reply_to: int | None = None, youtube_video_id: str | None = None) -> int:
     payload = {"chat_id": chat_id, "photo": bust(photo_url), "caption": caption[:1024], "parse_mode": "HTML"}
     if thread_id is not None:
         payload["message_thread_id"] = int(thread_id)
     if reply_to is not None:
         payload["reply_to_message_id"] = int(reply_to)
-    payload["reply_markup"] = get_platform_keyboard()
+    payload["reply_markup"] = get_platform_keyboard(youtube_video_id)
     res = tg_call("sendPhoto", payload, timeout=(4, TG_CMD_PHOTO_URL_TIMEOUT_SEC))
     return int(res["message_id"])
 
-def tg_send_photo_upload_to_cmd(chat_id: int, thread_id: int | None, image_bytes: bytes, caption: str, filename: str, reply_to: int | None = None) -> int:
+def tg_send_photo_upload_to_cmd(chat_id: int, thread_id: int | None, image_bytes: bytes, caption: str, filename: str, reply_to: int | None = None, youtube_video_id: str | None = None) -> int:
     url = tg_api_url("sendPhoto")
     data = {"chat_id": str(chat_id), "caption": caption[:1024], "parse_mode": "HTML"}
     if thread_id is not None:
         data["message_thread_id"] = str(thread_id)
     if reply_to is not None:
         data["reply_to_message_id"] = str(reply_to)
-    data["reply_markup"] = json.dumps(get_platform_keyboard())
+    data["reply_markup"] = json.dumps(get_platform_keyboard(youtube_video_id))
     files = {"photo": (filename, image_bytes)}
     r = http_request_tg("POST", url, data=data, files=files, timeout=(6, TG_CMD_PHOTO_UPLOAD_TIMEOUT_SEC))
     out = r.json()
@@ -1298,199 +1303,33 @@ def vk_fetch_best_effort() -> dict:
         return {"live": None, "error": str(e)}
 
 def youtube_fetch() -> dict:
-    """Parse YouTube channel streams page - extracts live stream data from lockupViewModel."""
+    """Discover the changing video ID on the channel tab, then verify the live player if needed."""
     headers = dict(HEADERS_HTML)
-    headers.update({
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
-    })
-
-    offline = {"live": False, "title": None, "category": None, "viewers": None, "thumb": None, "video_id": None}
-
+    headers.update({"Accept-Language": "en-US,en;q=0.9", "Cache-Control": "no-cache",
+                    "Cookie": "SOCS=CAE"})
+    channel_result = {"live": None, "error": "YouTube channel request failed"}
     try:
-        # Джиттер: случайная задержка 0.5-1.5 сек перед запросом к YouTube
-        time.sleep(random.uniform(0.5, 1.5))
-        url = bust(YOUTUBE_STREAMS_URL) or YOUTUBE_STREAMS_URL
-        r = http_request_ext("GET", url, headers=headers, timeout=25, allow_redirects=True)
-        html = r.text
-
-        log_line(f"YouTube streams page size: {len(html)} bytes")
-
-        live_data = None
-
-        # Ищем ytInitialData
-        yt_data_match = re.search(r'var\s+ytInitialData\s*=\s*(\{.+?\})\s*;\s*</script>', html, re.DOTALL)
-        if yt_data_match:
-            try:
-                yt_data = json.loads(yt_data_match.group(1))
-                # Ищем вкладку "Трансляции" или "Live"
-                tabs = (((yt_data.get("contents") or {}).get("twoColumnBrowseResultsRenderer") or {}).get("tabs") or [])
-                for tab in tabs:
-                    tab_renderer = tab.get("tabRenderer") or tab.get("expandableTabRenderer") or {}
-                    tab_title = tab_renderer.get("title", "")
-                    if "Трансляции" not in tab_title and "Live" not in tab_title:
-                        continue
-                    # YouTube 2025+: richGridRenderer прямо в content
-                    tab_content = tab_renderer.get("content") or {}
-                    rich_grid = tab_content.get("richGridRenderer") or {}
-                    rich_items = rich_grid.get("contents") or []
-                    for rich_item in rich_items:
-                        renderer = rich_item.get("richItemRenderer") or {}
-                        content = renderer.get("content") or {}
-                        # Новая структура: lockupViewModel вместо videoRenderer
-                        lvm = content.get("lockupViewModel") or {}
-                        if not lvm:
-                            continue
-                        # Проверяем, живой ли стрим через overlay badge
-                        is_live = False
-                        img = lvm.get("contentImage") or {}
-                        tvm = img.get("thumbnailViewModel") or {}
-                        overlays = tvm.get("overlays") or []
-                        for ov in overlays:
-                            bottom = ov.get("thumbnailBottomOverlayViewModel") or {}
-                            badges = bottom.get("badges") or []
-                            for b in badges:
-                                bvm = b.get("thumbnailBadgeViewModel") or {}
-                                badge_style = (bvm.get("badgeStyle") or "").upper()
-                                badge_text = (bvm.get("text") or "").upper()
-                                if "LIVE" in badge_style or badge_text in ("LIVE", "ПРЯМОЙ ЭФИР"):
-                                    is_live = True
-                                    break
-                            if is_live:
-                                break
-                        if not is_live:
-                            continue
-                        # Нашли живой стрим! Извлекаем данные
-                        # Название
-                        meta = lvm.get("metadata") or {}
-                        lmv = meta.get("lockupMetadataViewModel") or {}
-                        title_vm = lmv.get("title") or {}
-                        title_text = title_vm.get("content", "")
-                        if not title_text:
-                            title_text = title_vm.get("simpleText", "")
-                        # Зрители из metadata
-                        viewers = None
-                        meta_inner = lmv.get("metadata") or {}
-                        cmv = meta_inner.get("contentMetadataViewModel") or {}
-                        rows = cmv.get("metadataRows") or []
-                        for row in rows:
-                            parts = row.get("metadataParts") or []
-                            for part in parts:
-                                text_obj = part.get("text") or {}
-                                text_content = text_obj.get("content", "")
-                                if viewers is not None:
-                                    break
-                                # Формат EN: "399 watching" (число перед ключевым словом)
-                                vm = re.search(r'(\d[\d\s.,]*)\s*(?:смотрят|watching|watchers)', text_content, re.IGNORECASE)
-                                if vm:
-                                    try:
-                                        raw = vm.group(1).replace(" ", "").replace(",", "").replace(".", "")
-                                        viewers = int(raw)
-                                    except Exception:
-                                        pass
-                                    break
-                                # Формат RU: "Зрителей: 469" (число после ключевого слова)
-                                vm2 = re.search(r'(?:зрителей|viewers?)\s*:\s*(\d[\d\s.,]*)', text_content, re.IGNORECASE)
-                                if vm2:
-                                    try:
-                                        raw = vm2.group(1).replace(" ", "").replace(",", "").replace(".", "")
-                                        viewers = int(raw)
-                                    except Exception:
-                                        pass
-                                    break
-                                # Fallback: любое число в метаданных (страница "Трансляции" показывает только текущий стрим)
-                                vm3 = re.search(r'(\d[\d\s.,]+)', text_content)
-                                if vm3:
-                                    try:
-                                        raw = vm3.group(1).replace(" ", "").replace(",", "").replace(".", "")
-                                        num = int(raw)
-                                        if num > 0:
-                                            viewers = num
-                                    except Exception:
-                                        pass
-                        # Превью и video ID
-                        thumb = None
-                        video_id = None
-                        sources = tvm.get("image", {}).get("sources") or []
-                        if sources:
-                            thumb = sources[-1].get("url") or sources[0].get("url") or None
-                        if thumb:
-                            vid_match = re.search(r'/vi/([a-zA-Z0-9_-]+)/', thumb)
-                            if vid_match:
-                                video_id = vid_match.group(1)
-                        live_data = {
-                            "live": True,
-                            "title": trim(title_text, MAX_TITLE_LEN) if title_text else None,
-                            "category": "Стрим",
-                            "viewers": viewers,
-                            "thumb": thumb,
-                            "video_id": video_id,
-                        }
-                        break
-                    if live_data:
-                        break
-            except Exception as e:
-                log_line(f"YouTube ytInitialData parse error: {e}")
-
-        # Fallback: ищем LIVE через regex в HTML
-        if live_data is None:
-            live_badges = re.findall(r'"badgeStyle"\s*:\s*"THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE"', html, re.IGNORECASE)
-            if not live_badges:
-                live_badges = re.findall(r'"LIVE"', html)
-            if live_badges:
-                title_match = re.search(r'<meta[^>]+name=["\']title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-                if not title_match:
-                    title_match = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-                title = title_match.group(1).strip() if title_match else None
-                if title:
-                    title = re.sub(r'^.*?-\s*YouTube\s*[-–|]\s*', '', title).strip()
-                    if title.lower() in ("трансляции", "live", "streams", ""):
-                        title = None
-                thumb = None
-                thumb_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.IGNORECASE)
-                if thumb_match:
-                    thumb = thumb_match.group(1)
-                viewers = None
-                # EN: "399 watching" (число перед ключевым словом)
-                viewers_match = re.search(r'(\d[\d\s.,]*)\s*(?:смотрят|watching|watchers)', html, re.IGNORECASE)
-                if viewers_match:
-                    try:
-                        raw = viewers_match.group(1).replace(" ", "").replace(",", "").replace(".", "")
-                        viewers = int(raw)
-                    except Exception:
-                        pass
-                # RU: "Зрителей: 469" (число после ключевого слова)
-                if viewers is None:
-                    viewers_match2 = re.search(r'(?:зрителей|viewers?)\s*:\s*(\d[\d\s.,]*)', html, re.IGNORECASE)
-                    if viewers_match2:
-                        try:
-                            raw = viewers_match2.group(1).replace(" ", "").replace(",", "").replace(".", "")
-                            viewers = int(raw)
-                        except Exception:
-                            pass
-                live_data = {
-                    "live": True,
-                    "title": trim(title, MAX_TITLE_LEN) if title else None,
-                    "category": "Стрим",
-                    "viewers": viewers,
-                    "thumb": thumb,
-                    "video_id": None,
-                }
-                log_line(f"YouTube regex fallback: live=True, title='{title}', viewers={viewers}")
-
-        if live_data is not None:
-            log_line(f"YouTube: live={live_data['live']}, title='{live_data.get('title')}', viewers={live_data.get('viewers')}")
-            return live_data
-
-        log_line("YouTube: no live stream detected")
-        return offline
-
+        response = http_request_ext("GET", bust(YOUTUBE_STREAMS_URL), headers=headers, timeout=25)
+        channel_result = parse_streams_page(response.text)
+        log_line(f"YouTube channel: live={channel_result.get('live')}, video_id={channel_result.get('video_id')}")
+        if channel_result.get("live"):
+            channel_result["title"] = trim(channel_result.get("title"), MAX_TITLE_LEN)
+            return channel_result
     except Exception as e:
-        log_line(f"YouTube fetch HTTP error: {e}")
-        return {"live": None, "error": str(e)}
+        log_line(f"YouTube channel fetch error: {e}")
+    # /live is only discovery: its redirected player must explicitly confirm isLiveNow.
+    try:
+        response = http_request_ext("GET", f"https://www.youtube.com/@{YOUTUBE_HANDLE}/live", headers=headers, timeout=25)
+        player_result = parse_live_player_page(response.text)
+        if player_result.get("live"):
+            player_result["title"] = trim(player_result.get("title"), MAX_TITLE_LEN)
+            log_line(f"YouTube live player: video_id={player_result.get('video_id')}")
+            return player_result
+    except Exception as e:
+        log_line(f"YouTube live player fetch error: {e}")
+    if channel_result.get("live") is None:
+        log_line(f"YouTube status unknown: {channel_result.get('error')}")
+    return channel_result
 
 def fetch_all_platforms():
     """Fetch Kick, VK, YouTube in parallel to reduce poll cycle latency."""
@@ -1608,7 +1447,9 @@ def build_caption(prefix: str, st: dict, kick: dict, vk: dict, yt: dict = None) 
     lines.append(" ")
     lines.append(f"🔗 Kick: {KICK_PUBLIC_URL}")
     lines.append(f"🔗 VK Play: {VK_PUBLIC_URL}")
-    lines.append(f"🔗 YouTube: {YOUTUBE_STREAMS_URL}")
+    yt_video_id = (yt or {}).get("video_id")
+    yt_url = f"https://www.youtube.com/watch?v={yt_video_id}" if yt_video_id else YOUTUBE_STREAMS_URL
+    lines.append(f"🔗 YouTube: {yt_url}")
     return "\n".join(lines)
 
 def build_end_text(st: dict) -> str:
@@ -1636,7 +1477,23 @@ def is_new_after_restart(st: dict, any_live: bool, now_ts: int) -> bool:
     last_live = int(st.get("last_any_live_ts") or 0)
     return bool(last_live and now_ts - last_live >= NEW_STREAM_AFTER_GAP_SEC)
 
+def platform_transition_descriptions(st: dict, kick: dict, vk: dict, yt: dict) -> list:
+    events = []
+    for key, label, sample in (("kick", "🎥 Kick", kick), ("vk", "🎮 VK Play", vk), ("yt", "📺 YouTube", yt)):
+        if sample.get("unknown") or sample.get("reconnecting"):
+            continue
+        previous_live = bool(st.get(key + "_live"))
+        live = bool(sample.get("live"))
+        new_youtube_id = (key == "yt" and live and sample.get("video_id")
+                          and sample["video_id"] != st.get("youtube_video_id"))
+        if live and (not previous_live or new_youtube_id):
+            events.append(label + " запущен")
+        elif previous_live and not live:
+            events.append(label + " отключен")
+    return events
+
 def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None, yt: dict = None) -> None:
+    yt_video_id = (yt or {}).get("video_id") or ""
     caption = build_caption(prefix, st, kick, vk, yt)
     tg_send_chat_action(chat_id, thread_id, "upload_photo")
     shot = None
@@ -1657,8 +1514,8 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
     # Если есть скриншот - отправляем его
     if shot:
         try:
-            tg_send_photo_upload_to(chat_id, thread_id, shot, caption, filename=f"live_{ts()}.jpg", reply_to=reply_to)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_upload_to(chat_id, thread_id, shot, caption, filename=f"live_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
         except Exception as e:
             log_line(f"Screenshot send failed, trying text fallback: {e}")
@@ -1667,24 +1524,24 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
     if kick.get("live") and kick.get("thumb"):
         try:
             img = download_image(kick["thumb"])
-            tg_send_photo_upload_to(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_upload_to(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
         except Exception:
             pass
     if VK_PREVIEW_FALLBACK and vk.get("live") and vk.get("thumb"):
         try:
             img = download_image(vk["thumb"])
-            tg_send_photo_upload_to(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_upload_to(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
         except Exception:
             pass
     if yt is not None and yt.get("live") and yt.get("thumb"):
         try:
             img = download_image(yt["thumb"])
-            tg_send_photo_upload_to(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_upload_to(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
         except Exception:
             pass
@@ -1692,29 +1549,29 @@ def send_status_with_screen_to(prefix: str, st: dict, kick: dict, vk: dict, chat
     # Last fallback: URL фото (без загрузки)
     if kick.get("live") and kick.get("thumb"):
         try:
-            tg_send_photo_url_to(chat_id, thread_id, kick["thumb"], caption, reply_to=reply_to)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_url_to(chat_id, thread_id, kick["thumb"], caption, reply_to=reply_to, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
         except Exception as e:
             log_line(f"Kick photo URL send failed: {e}")
     if VK_PREVIEW_FALLBACK and vk.get("live") and vk.get("thumb"):
         try:
-            tg_send_photo_url_to(chat_id, thread_id, vk["thumb"], caption, reply_to=reply_to)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_url_to(chat_id, thread_id, vk["thumb"], caption, reply_to=reply_to, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
         except Exception as e:
             log_line(f"VK photo URL send failed: {e}")
     if yt is not None and yt.get("live") and yt.get("thumb"):
         try:
-            tg_send_photo_url_to(chat_id, thread_id, yt["thumb"], caption, reply_to=reply_to)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_url_to(chat_id, thread_id, yt["thumb"], caption, reply_to=reply_to, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
         except Exception as e:
             log_line(f"YouTube photo URL send failed: {e}")
     
     # Вообще без картинки
-    tg_send_to(chat_id, thread_id, caption, reply_to=reply_to)
-    maybe_send_to_pubg_topic(caption, st, kick)
+    tg_send_to(chat_id, thread_id, caption, reply_to=reply_to, youtube_video_id=yt_video_id)
+    maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
 
 def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: bool, kick_cat_changed: bool, vk_title_changed: bool, vk_cat_changed: bool, yt: dict = None, yt_title_changed: bool = False) -> str:
     lines: list[str] = []
@@ -1779,10 +1636,13 @@ def build_change_caption(st: dict, kick: dict, vk: dict, kick_title_changed: boo
         lines.append(" ")
     lines.append(f"🔗 {KICK_PUBLIC_URL}")
     lines.append(f"🔗 {VK_PUBLIC_URL}")
-    lines.append(f"🔗 {YOUTUBE_STREAMS_URL}")
+    yt_video_id = (yt or {}).get("video_id")
+    yt_url = f"https://www.youtube.com/watch?v={yt_video_id}" if yt_video_id else YOUTUBE_STREAMS_URL
+    lines.append(f"🔗 {yt_url}")
     return "\n".join(lines)
 
 def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict, yt: dict = None) -> None:
+    yt_video_id = (yt or {}).get("video_id") or ""
     shot = None
     if kick.get("live"):
         playback_url = kick.get("playback_url")
@@ -1793,32 +1653,33 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict, yt: d
     
     if shot:
         try:
-            tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, shot, caption, filename=f"change_{ts()}.jpg", reply_to=None)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, shot, caption, filename=f"change_{ts()}.jpg", reply_to=None, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
         except Exception as e:
             log_line(f"Fresh screenshot upload failed, fallback: {e}")
     try:
         if kick.get("live") and kick.get("thumb"):
             img = download_image(kick["thumb"])
-            tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=None)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=None, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
         if VK_PREVIEW_FALLBACK and vk.get("live") and vk.get("thumb"):
             img = download_image(vk["thumb"])
-            tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=None)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=None, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
         if yt is not None and yt.get("live") and yt.get("thumb"):
             img = download_image(yt["thumb"])
-            tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=None)
-            maybe_send_to_pubg_topic(caption, st, kick)
+            tg_send_photo_upload_to(GROUP_ID, TOPIC_ID, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=None, youtube_video_id=yt_video_id)
+            maybe_send_to_pubg_topic(caption, st, kick, youtube_video_id=yt_video_id)
             return
     except Exception:
         pass
-    tg_send_main_and_maybe_pubg(caption, st, kick)
+    tg_send_main_and_maybe_pubg(caption, st, kick, youtube_video_id=yt_video_id)
 
 def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None, yt: dict = None) -> None:
+    yt_video_id = (yt or {}).get("video_id") or ""
     """Отправка статуса в ответ на команду - НЕ дублирует в PUBG топик"""
     caption = build_caption(prefix, st, kick, vk, yt)
     shot = None
@@ -1834,30 +1695,30 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
         shot = screenshot_from_vk_page(VK_PUBLIC_URL)
     
     if shot:
-        tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption, filename=f"live_{ts()}.jpg", reply_to=reply_to)
+        tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption, filename=f"live_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
         return
     if kick.get("live") and kick.get("thumb"):
         try:
             img = download_image(kick.get("thumb"))
-            tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
+            tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
         except Exception:
-            tg_send_photo_url_to_cmd(chat_id, thread_id, kick.get("thumb"), caption, reply_to=reply_to)
+            tg_send_photo_url_to_cmd(chat_id, thread_id, kick.get("thumb"), caption, reply_to=reply_to, youtube_video_id=yt_video_id)
         return
     if VK_PREVIEW_FALLBACK and vk.get("live") and vk.get("thumb"):
         try:
             img = download_image(vk.get("thumb"))
-            tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
+            tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
         except Exception:
-            tg_send_photo_url_to_cmd(chat_id, thread_id, vk.get("thumb"), caption, reply_to=reply_to)
+            tg_send_photo_url_to_cmd(chat_id, thread_id, vk.get("thumb"), caption, reply_to=reply_to, youtube_video_id=yt_video_id)
         return
     if yt is not None and yt.get("live") and yt.get("thumb"):
         try:
             img = download_image(yt.get("thumb"))
-            tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to)
+            tg_send_photo_upload_to_cmd(chat_id, thread_id, img, caption, filename=f"thumb_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
         except Exception:
-            tg_send_photo_url_to_cmd(chat_id, thread_id, yt.get("thumb"), caption, reply_to=reply_to)
+            tg_send_photo_url_to_cmd(chat_id, thread_id, yt.get("thumb"), caption, reply_to=reply_to, youtube_video_id=yt_video_id)
         return
-    tg_send_to_cmd(chat_id, thread_id, caption, reply_to=reply_to)
+    tg_send_to_cmd(chat_id, thread_id, caption, reply_to=reply_to, youtube_video_id=yt_video_id)
 
 def send_status_with_screen(prefix: str, st: dict, kick: dict, vk: dict, yt: dict = None) -> None:
     send_status_with_screen_to(prefix, st, kick, vk, GROUP_ID, TOPIC_ID, reply_to=None, yt=yt)
@@ -2049,6 +1910,7 @@ def commands_loop_once():
                     log_line(f"YouTube fetch (command) error: {e}")
                 with STATE_LOCK:
                     st_cur = load_state()
+                kick, vk, yt = retain_unknown_platforms(kick, vk, yt, st_cur)
                 st_cur["any_live"] = bool(kick.get("live") or vk.get("live") or yt.get("live"))
                 st_cur["kick_live"] = bool(kick.get("live"))
                 st_cur["vk_live"] = bool(vk.get("live"))
@@ -2066,7 +1928,7 @@ def commands_loop_once():
                 st_cur["vk_viewers"] = vk.get("viewers")
                 st_cur["yt_viewers"] = yt.get("viewers")
                 st_cur["youtube_video_id"] = yt.get("video_id")
-                save_state(st_cur)
+                # Command replies must not consume transitions before the monitoring loop sends them.
             if not (kick.get("live") or vk.get("live") or yt.get("live")):
                 try:
                     tg_send_to(chat_id, thread_id, build_no_stream_text("Сейчас на канале Глад Валакас патока нет!"), reply_to=reply_to, with_buttons=False)
@@ -2162,6 +2024,12 @@ def main_loop():
             st["any_live"] = False
             for key in ("kick", "vk", "yt"):
                 st[key + "_live"] = False
+        if any_live0 and not is_new_stream:
+            pending = list(st.get("pending_toggles") or [])
+            for event in platform_transition_descriptions(previous_boot_state, kick0, vk0, yt0):
+                if event not in pending:
+                    pending.append(event)
+            st["pending_toggles"] = pending
         
         # Устанавливаем текущее состояние
         if any_live0:
@@ -2320,46 +2188,9 @@ def main_loop():
     
         # ===== SCENARIO 2: PLATFORM TOGGLE =====
         elif any_live and prev_any:
-            # Пропускаем изменение категории/названия на первой итерации
-            # (это не реальное изменение, а просто инициализация)
-            if is_first_poll:
-                log_line(f">>> SKIPPING changes on first poll (initialization)")
-                platform_changed = False
-                change_desc = []
-            else:
-                platform_changed = False
-                change_desc = []
-                
-                if kick_live and not prev_kick_live:
-                    platform_changed = True
-                    change_desc.append("🎥 Kick запущен")
-                    log_line(f">>> PLATFORM TOGGLE: Kick started <<<")
-                
-                if vk_live and not prev_vk_live:
-                    platform_changed = True
-                    change_desc.append("🎮 VK Play запущен")
-                    log_line(f">>> PLATFORM TOGGLE: VK Play started <<<")
-                
-                if yt_live and not prev_yt_live:
-                    platform_changed = True
-                    change_desc.append("📺 YouTube запущен")
-                    log_line(f">>> PLATFORM TOGGLE: YouTube started <<<")
-                
-                if not kick_live and prev_kick_live:
-                    platform_changed = True
-                    change_desc.append("🎥 Kick отключен")
-                    log_line(f">>> PLATFORM TOGGLE: Kick stopped <<<")
-                
-                if not vk_live and prev_vk_live:
-                    platform_changed = True
-                    change_desc.append("🎮 VK Play отключен")
-                    log_line(f">>> PLATFORM TOGGLE: VK Play stopped <<<")
-                
-                if not yt_live and prev_yt_live:
-                    platform_changed = True
-                    change_desc.append("📺 YouTube отключен")
-                    log_line(f">>> PLATFORM TOGGLE: YouTube stopped <<<")
-            
+            # A new YouTube video ID is a new launch even when a prior live flag remained true.
+            change_desc = platform_transition_descriptions(st, kick, vk, yt)
+            platform_changed = bool(change_desc)
             if platform_changed:
                 with STATE_LOCK:
                     st_toggle = load_state()
@@ -2368,6 +2199,7 @@ def main_loop():
                         if desc not in pending:
                             pending.append(desc)
                     st_toggle["pending_toggles"] = pending
+                    st_toggle["youtube_video_id"] = yt.get("video_id")
                     save_state(st_toggle)
             with STATE_LOCK:
                 st_toggle = load_state()
@@ -2633,6 +2465,7 @@ def screenshot_refresher_forever() -> None:
             time.sleep(3)
 
 def main():
+    log_line(f"[build] {BOT_BUILD}")
     log_line(f"[cfg] POLL_INTERVAL={POLL_INTERVAL} COMMAND_POLL_TIMEOUT={COMMAND_POLL_TIMEOUT} COMMAND_HTTP_TIMEOUT={COMMAND_HTTP_TIMEOUT}")
     log_line(f"[cfg] START_DEDUP={START_DEDUP_SEC}s CHANGE_DEDUP={CHANGE_DEDUP_SEC}s TOGGLE_DEDUP={PLATFORM_TOGGLE_DEDUP_SEC}s END_STREAK={END_CONFIRM_STREAK}")
     log_line(f"[cfg] TRANSITION_GRACE_PERIOD={TRANSITION_GRACE_PERIOD_SEC}s TRANSITION_STREAK_THRESHOLD={TRANSITION_STREAK_THRESHOLD}")
