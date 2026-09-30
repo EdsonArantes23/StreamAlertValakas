@@ -152,7 +152,7 @@ def parse_live_player_page(html):
             "url": f"https://www.youtube.com/watch?v={video_id}"}
 
 
-BOT_BUILD = "2026.09.30-command-images"
+BOT_BUILD = "2026.09.30-image-priority"
 
 # ========== CONFIG (ENV) ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -1276,10 +1276,10 @@ def kick_fetch() -> dict:
             thumb = th.get("url") or th.get("src") or None
         if not thumb:
             thumb = ls.get("thumbnail_url") or None
-        playback_url = None
+        playback_url = data.get("playback_url") or ls.get("playback_url")
         sc = data.get("streamer_channel") or {}
         if isinstance(sc, dict):
-            playback_url = sc.get("playback_url") or None
+            playback_url = playback_url or sc.get("playback_url") or None
         return {"live": is_live, "title": trim(title, MAX_TITLE_LEN), "category": trim(cat, MAX_GAME_LEN), "viewers": viewers, "thumb": thumb, "created_at": created_at, "playback_url": playback_url}
     except Exception as e:
         log_line(f"Kick fetch error: {e}")
@@ -1831,36 +1831,31 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
     """Called from a reply worker; a failed photo always falls back to text."""
     yt_video_id = (yt or {}).get("video_id") or ""
     caption = build_caption(prefix, st, kick, vk, yt)
-    shot = None
-    for source, sample in (("kick", kick), ("vk", vk)):
+    for source, sample in (("kick", kick), ("yt", yt or {}), ("vk", vk)):
         if not sample.get("live"):
             continue
-        cached = _shot_cache_get(source)
-        if cached:
-            shot = cached[0]
-        elif source == "kick" and sample.get("playback_url"):
-            shot = screenshot_from_m3u8_fast(sample["playback_url"])
-        elif source == "vk":
-            shot = screenshot_from_vk_page(VK_PUBLIC_URL, command_mode=True)
-        if shot:
-            break
-    if shot:
         try:
-            tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption,
-                filename=f"live_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
-            return
+            if source == "yt":
+                thumb = sample.get("thumb")
+                if not thumb and yt_video_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", yt_video_id):
+                    thumb = f"https://i.ytimg.com/vi/{yt_video_id}/hqdefault.jpg"
+                if thumb:
+                    tg_send_photo_url_to_cmd(chat_id, thread_id, thumb, caption,
+                        reply_to=reply_to, youtube_video_id=yt_video_id)
+                    return
+                continue
+            cached = _shot_cache_get(source)
+            shot = cached[0] if cached else None
+            if not shot and source == "kick" and sample.get("playback_url"):
+                shot = screenshot_from_m3u8_fast(sample["playback_url"])
+            if not shot and source == "vk":
+                shot = screenshot_from_vk_page(VK_PUBLIC_URL, command_mode=True)
+            if shot:
+                tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption,
+                    filename=f"live_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
+                return
         except Exception as e:
-            log_line(f"Command photo failed; sending text: {e}")
-    yt_thumb = (yt or {}).get("thumb")
-    if not yt_thumb and yt_video_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", yt_video_id):
-        yt_thumb = f"https://i.ytimg.com/vi/{yt_video_id}/hqdefault.jpg"
-    if yt and yt.get("live") and yt_thumb:
-        try:
-            tg_send_photo_url_to_cmd(chat_id, thread_id, yt_thumb, caption,
-                reply_to=reply_to, youtube_video_id=yt_video_id)
-            return
-        except Exception as e:
-            log_line(f"YouTube command photo failed; sending text: {e}")
+            log_line(f"Command picture from {source} failed; trying next platform: {e}")
     tg_send_to_cmd(chat_id, thread_id, caption, reply_to=reply_to, youtube_video_id=yt_video_id)
 
 STATUS_REPLY_SLOTS = threading.BoundedSemaphore(2)
