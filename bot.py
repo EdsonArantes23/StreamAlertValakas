@@ -152,7 +152,7 @@ def parse_live_player_page(html):
             "url": f"https://www.youtube.com/watch?v={video_id}"}
 
 
-BOT_BUILD = "2026.09.30-image-priority"
+BOT_BUILD = "2026.09.30-kick-image-fallback"
 
 # ========== CONFIG (ENV) ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -1853,6 +1853,23 @@ def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, 
             if shot:
                 tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption,
                     filename=f"live_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
+                return
+            if source == "kick" and sample.get("thumb"):
+                # Only the active livestream thumbnail, never a profile image.
+                preview_caption = caption + "\n🖼 Превью текущего эфира Kick"
+                try:
+                    img = download_image(sample["thumb"])
+                    if ffmpeg_available():
+                        converted = subprocess.run([FFMPEG_BIN, "-hide_banner", "-loglevel", "error",
+                            "-i", "pipe:0", "-frames:v", "1", "-f", "image2pipe",
+                            "-vcodec", "mjpeg", "pipe:1"], input=img, capture_output=True, timeout=5)
+                        if converted.returncode == 0 and converted.stdout:
+                            img = converted.stdout
+                    tg_send_photo_upload_to_cmd(chat_id, thread_id, img, preview_caption,
+                        filename=f"kick_preview_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
+                except Exception:
+                    tg_send_photo_url_to_cmd(chat_id, thread_id, sample["thumb"], preview_caption,
+                        reply_to=reply_to, youtube_video_id=yt_video_id)
                 return
         except Exception as e:
             log_line(f"Command picture from {source} failed; trying next platform: {e}")
