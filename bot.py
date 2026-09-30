@@ -152,7 +152,7 @@ def parse_live_player_page(html):
             "url": f"https://www.youtube.com/watch?v={video_id}"}
 
 
-BOT_BUILD = "2026.09.30-command-fix"
+BOT_BUILD = "2026.09.30-command-images"
 
 # ========== CONFIG (ENV) ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -1205,21 +1205,25 @@ def vk_live_hls_url(payload: dict) -> str | None:
                     return url
     return None
 
-def screenshot_from_vk_page(page_url: str) -> bytes | None:
+def screenshot_from_vk_page(page_url: str, command_mode: bool = False) -> bytes | None:
     """Capture a real video frame from VK's live HLS player URL."""
     if not FFMPEG_ENABLED or not page_url or not ffmpeg_available():
         return None
     try:
         api_headers = dict(HEADERS_JSON)
         api_headers["Referer"] = page_url
-        response = http_request_ext("GET", VK_VIDEO_API_URL, headers=api_headers, timeout=15)
+        if command_mode:
+            response = EXT_SESSION.get(VK_VIDEO_API_URL, headers=api_headers, timeout=(3, 6))
+            response.raise_for_status()
+        else:
+            response = http_request_ext("GET", VK_VIDEO_API_URL, headers=api_headers, timeout=15)
         playback_url = vk_live_hls_url(response.json())
         if playback_url:
             cmd = [FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-nostdin",
                    "-user_agent", UA, "-headers", f"Referer: {page_url}\r\n",
                    "-i", playback_url, "-frames:v", "1", "-vf", f"scale={FFMPEG_SCALE}",
                    "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"]
-            shot = subprocess.run(cmd, capture_output=True, timeout=FFMPEG_TIMEOUT_SEC)
+            shot = subprocess.run(cmd, capture_output=True, timeout=min(FFMPEG_TIMEOUT_SEC, FFMPEG_CMD_TIMEOUT_SEC) if command_mode else FFMPEG_TIMEOUT_SEC)
             if shot.returncode == 0 and shot.stdout:
                 _shot_cache_set(shot.stdout, "vk")
                 return shot.stdout
@@ -1228,6 +1232,8 @@ def screenshot_from_vk_page(page_url: str) -> bytes | None:
             log_line("VK live player has no live_hls URL")
     except Exception as e:
         log_line(f"VK live player API error: {e}")
+    if command_mode:
+        return None
     try:
         headers = dict(HEADERS_HTML)
         headers.update({"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"})
@@ -1612,6 +1618,14 @@ def is_new_after_restart(st: dict, any_live: bool, now_ts: int) -> bool:
     last_live = int(st.get("last_any_live_ts") or 0)
     return bool(last_live and now_ts - last_live >= NEW_STREAM_AFTER_GAP_SEC)
 
+def remember_media(st: dict, kick: dict, vk: dict, yt: dict) -> None:
+    for key, sample in (("kick", kick), ("vk", vk), ("yt", yt)):
+        if sample.get("unknown") or sample.get("reconnecting"):
+            continue
+        st[key + "_thumb"] = sample.get("thumb")
+        if key == "kick":
+            st["kick_playback_url"] = sample.get("playback_url")
+
 def platform_transition_descriptions(st: dict, kick: dict, vk: dict, yt: dict) -> list:
     events = []
     for key, label, sample in (("kick", "🎥 Kick", kick), ("vk", "🎮 VK Play", vk), ("yt", "📺 YouTube", yt)):
@@ -1814,19 +1828,61 @@ def send_caption_with_screen(caption: str, st: dict, kick: dict, vk: dict, yt: d
     tg_send_main_and_maybe_pubg(caption, st, kick, youtube_video_id=yt_video_id)
 
 def send_status_with_screen_to_cmd(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None, yt: dict = None) -> None:
-    """Reply without fetching websites or running ffmpeg in the command polling thread."""
+    """Called from a reply worker; a failed photo always falls back to text."""
     yt_video_id = (yt or {}).get("video_id") or ""
     caption = build_caption(prefix, st, kick, vk, yt)
-    source = "kick" if kick.get("live") else "vk" if vk.get("live") else None
-    cached = _shot_cache_get(source) if source else None
-    if cached:
+    shot = None
+    for source, sample in (("kick", kick), ("vk", vk)):
+        if not sample.get("live"):
+            continue
+        cached = _shot_cache_get(source)
+        if cached:
+            shot = cached[0]
+        elif source == "kick" and sample.get("playback_url"):
+            shot = screenshot_from_m3u8_fast(sample["playback_url"])
+        elif source == "vk":
+            shot = screenshot_from_vk_page(VK_PUBLIC_URL, command_mode=True)
+        if shot:
+            break
+    if shot:
         try:
-            tg_send_photo_upload_to_cmd(chat_id, thread_id, cached[0], caption,
+            tg_send_photo_upload_to_cmd(chat_id, thread_id, shot, caption,
                 filename=f"live_{ts()}.jpg", reply_to=reply_to, youtube_video_id=yt_video_id)
             return
         except Exception as e:
             log_line(f"Command photo failed; sending text: {e}")
+    yt_thumb = (yt or {}).get("thumb")
+    if not yt_thumb and yt_video_id and re.fullmatch(r"[A-Za-z0-9_-]{11}", yt_video_id):
+        yt_thumb = f"https://i.ytimg.com/vi/{yt_video_id}/hqdefault.jpg"
+    if yt and yt.get("live") and yt_thumb:
+        try:
+            tg_send_photo_url_to_cmd(chat_id, thread_id, yt_thumb, caption,
+                reply_to=reply_to, youtube_video_id=yt_video_id)
+            return
+        except Exception as e:
+            log_line(f"YouTube command photo failed; sending text: {e}")
     tg_send_to_cmd(chat_id, thread_id, caption, reply_to=reply_to, youtube_video_id=yt_video_id)
+
+STATUS_REPLY_SLOTS = threading.BoundedSemaphore(2)
+
+def dispatch_status_reply(prefix: str, st: dict, kick: dict, vk: dict, chat_id: int, thread_id: int | None, reply_to: int | None, yt: dict = None) -> None:
+    """Keep Telegram polling responsive while up to two workers retrieve pictures."""
+    if not STATUS_REPLY_SLOTS.acquire(blocking=False):
+        tg_send_to_cmd(chat_id, thread_id, build_caption(prefix, st, kick, vk, yt),
+            reply_to=reply_to, youtube_video_id=(yt or {}).get("video_id") or "")
+        return
+    def reply():
+        try:
+            send_status_with_screen_to_cmd(prefix, st, kick, vk, chat_id, thread_id, reply_to, yt=yt)
+        except Exception as e:
+            log_line(f"Status reply worker failed: {e}")
+        finally:
+            STATUS_REPLY_SLOTS.release()
+    try:
+        threading.Thread(target=reply, daemon=True).start()
+    except Exception:
+        STATUS_REPLY_SLOTS.release()
+        raise
 
 def send_status_with_screen(prefix: str, st: dict, kick: dict, vk: dict, yt: dict = None) -> None:
     send_status_with_screen_to(prefix, st, kick, vk, GROUP_ID, TOPIC_ID, reply_to=None, yt=yt)
@@ -2005,11 +2061,13 @@ def commands_loop_once():
                     st_cur = load_state()
                 # Monitoring owns platform state. Commands answer from its last completed poll.
                 kick = {"live": bool(st_cur.get("kick_live")), "title": st_cur.get("kick_title"),
-                        "category": st_cur.get("kick_cat"), "viewers": st_cur.get("kick_viewers")}
+                        "category": st_cur.get("kick_cat"), "viewers": st_cur.get("kick_viewers"),
+                        "playback_url": st_cur.get("kick_playback_url"), "thumb": st_cur.get("kick_thumb")}
                 vk = {"live": bool(st_cur.get("vk_live")), "title": st_cur.get("vk_title"),
                       "category": st_cur.get("vk_cat"), "viewers": st_cur.get("vk_viewers")}
                 yt = {"live": bool(st_cur.get("yt_live")), "title": st_cur.get("yt_title"),
-                      "viewers": st_cur.get("yt_viewers"), "video_id": st_cur.get("youtube_video_id")}
+                      "viewers": st_cur.get("yt_viewers"), "video_id": st_cur.get("youtube_video_id"),
+                      "thumb": st_cur.get("yt_thumb")}
             checked_at = int(st_cur.get("last_platform_poll_ts") or st_cur.get("last_any_live_ts") or 0)
             if not checked_at:
                 tg_send_to_cmd(chat_id, thread_id, "⏳ Бот запущен. Первая проверка площадок ещё выполняется.",
@@ -2022,7 +2080,7 @@ def commands_loop_once():
                     log_line(f"send no-stream reply failed: {e}")
             else:
                 try:
-                    send_status_with_screen_to_cmd("📌 Текущее состояние патока\n🕒 Последняя проверка: " + fmt_msk_hm_from_ts(checked_at), st_cur, kick, vk, chat_id, thread_id, reply_to, yt=yt)
+                    dispatch_status_reply("📌 Текущее состояние патока\n🕒 Последняя проверка: " + fmt_msk_hm_from_ts(checked_at), st_cur, kick, vk, chat_id, thread_id, reply_to, yt=yt)
                 except Exception as e:
                     log_line(f"send_status_with_screen_to failed: {e}")
         except Exception as e:
@@ -2147,6 +2205,7 @@ def main_loop():
         # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: маркируем первую итерацию
         st["is_first_poll"] = True
         
+        remember_media(st, kick0, vk0, yt0)
         st["last_platform_poll_ts"] = ts()
         stats_tick(st, kick0, vk0, any_live0, now_ts=ts(), yt=yt0)
         save_state(st)
@@ -2487,6 +2546,7 @@ def main_loop():
             # Сбрасываем флаг первого опроса
             st["is_first_poll"] = False
             
+            remember_media(st, kick, vk, yt)
             st["last_platform_poll_ts"] = current_ts
             stats_tick(st, kick, vk, any_live, now_ts=ts(), yt=yt)
             save_state(st)
@@ -2541,6 +2601,8 @@ def screenshot_refresher_forever() -> None:
                 img = screenshot_from_vk_page(VK_PUBLIC_URL)
                 if img:
                     _shot_cache_set(img, "vk")
+                    time.sleep(max(2, int(SHOT_REFRESH_SEC)))
+                    continue
             if yt.get("live") and yt.get("thumb"):
                 try:
                     img = download_image(yt["thumb"])
